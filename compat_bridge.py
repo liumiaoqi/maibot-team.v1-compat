@@ -188,7 +188,7 @@ class CompatBridge:
                 except Exception:
                     break
 
-                envelope = self._codec.decode(frame)
+                envelope = self._codec.decode_envelope(frame)
                 await self._dispatch_rpc(conn, envelope)
         finally:
             self._conn = None
