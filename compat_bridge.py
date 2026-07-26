@@ -44,9 +44,11 @@ class CompatBridge:
         self,
         config: CompatConfig,
         component_bridge: ComponentBridge,
+        capability_bridge=None,
     ) -> None:
         self._config = config
         self._component_bridge = component_bridge
+        self._capability_bridge = capability_bridge
         self._transport: TCPServerTransport | None = None
         self._codec = MsgPackCodec()
         self._runner_process: asyncio.subprocess.Process | None = None
@@ -270,9 +272,12 @@ class CompatBridge:
 
     async def _handle_capability_call(self, envelope: Envelope) -> Envelope:
         payload = CapabilityRequestPayload(**envelope.payload)
-        result = await self._component_bridge.dispatch_capability(
-            payload.capability, payload.args,
-        )
+        if self._capability_bridge is not None:
+            result = await self._capability_bridge.handle_cap_call(
+                envelope.plugin_id, payload.capability, payload.args,
+            )
+        else:
+            result = {"success": False, "error": "CAPABILITY_BRIDGE_NOT_INITIALIZED"}
         return envelope.make_response(
             payload=CapabilityResponsePayload(
                 success=result.get("success", False),

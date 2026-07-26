@@ -57,8 +57,16 @@ class V1CompatPlugin(MaiBotPlugin):
         # 注入 V4 Event 回调
         self._component_bridge.set_emit_callback(self.ctx.emit_event)
 
+        # 创建 CapabilityBridge（V1 cap.call → V4 PluginContext）
+        from .capability_bridge import CapabilityBridge
+        capability_bridge = CapabilityBridge(
+            plugin_context=self.ctx, plugin_id=self.plugin_id,
+        )
+
         # 启动 CompatBridge（内部启动 IPC Server + V1 Runner 子进程）
-        self._compat_bridge = CompatBridge(self._config, self._component_bridge)
+        self._compat_bridge = CompatBridge(
+            self._config, self._component_bridge, capability_bridge,
+        )
         await self._compat_bridge.start()
 
         # 等待 V1 Runner 就绪
