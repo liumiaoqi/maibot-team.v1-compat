@@ -1,0 +1,15 @@
+{
+  "manifest_version": 3,
+  "id": "maibot-team.v1-compat",
+  "name": "V1 Compatibility Layer",
+  "version": "1.0.0",
+  "description": "Bridge V1 plugins to V4 runtime via generalized dispatch",
+  "author": "MaiBot Team",
+  "scopes": [
+    "message:send:text", "message:send:image", "message:send:emoji",
+    "message:send:forward", "message:send:hybrid",
+    "database:read:self", "database:write:self",
+    "session:read:detail", "session:read:list",
+    "agent:read:emotion", "person:read:id", "system:execute:command"
+  ]
+}
