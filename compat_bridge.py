@@ -124,7 +124,7 @@ class CompatBridge:
     async def _spawn_runner(self) -> None:
         """启动 V1 Runner 子进程。"""
         env = os.environ.copy()
-        env["MAIBOT_IPC_ADDRESS"] = f"tcp://127.0.0.1:{self._listen_port}"
+        env["MAIBOT_IPC_ADDRESS"] = f"127.0.0.1:{self._listen_port}"
         env["MAIBOT_SESSION_TOKEN"] = self._config.session_token
         env["MAIBOT_PLUGIN_DIRS"] = ",".join(self._config.plugin_dirs)
         env["MAIBOT_HOST_VERSION"] = self._config.host_version
