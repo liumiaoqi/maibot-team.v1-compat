@@ -16,7 +16,7 @@ from src.common.logger import get_logger
 from src.plugin_runtime.protocol.codec import MsgPackCodec
 from src.plugin_runtime.protocol.envelope import (
     BootstrapPluginPayload,
-    BootstrapPluginResultPayload,
+
     CapabilityRequestPayload,
     CapabilityResponsePayload,
     Envelope,
@@ -25,7 +25,7 @@ from src.plugin_runtime.protocol.envelope import (
     RegisterPluginPayload,
     RunnerReadyPayload,
 )
-from src.plugin_runtime.protocol.transport.tcp_server import TCPServerTransport
+from src.plugin_runtime.transport.tcp import TCPTransportServer
 
 if TYPE_CHECKING:
     from .component_bridge import ComponentBridge
@@ -49,7 +49,7 @@ class CompatBridge:
         self._config = config
         self._component_bridge = component_bridge
         self._capability_bridge = capability_bridge
-        self._transport: TCPServerTransport | None = None
+        self._transport: TCPTransportServer | None = None
         self._codec = MsgPackCodec()
         self._runner_process: asyncio.subprocess.Process | None = None
         self._restart_count: int = 0
@@ -73,9 +73,9 @@ class CompatBridge:
         self._config.session_token = session_token
 
         # 1. 启动 V1 IPC Server（TCP 随机端口）
-        self._transport = TCPServerTransport(listen_address="127.0.0.1:0")
-        self._listen_port = self._transport.listen_port  # start() 后可用
+        self._transport = TCPTransportServer(host="127.0.0.1", port=0)
         await self._transport.start(self._handle_connection)
+        self._listen_port = self._transport._actual_port
         logger.info("[compat] IPC Server 已启动: tcp://127.0.0.1:%d", self._listen_port)
 
         # 2. 启动 V1 Runner 子进程
@@ -227,12 +227,12 @@ class CompatBridge:
 
     async def _handle_bootstrap(self, envelope: Envelope) -> Envelope:
         payload = BootstrapPluginPayload(**envelope.payload)
-        result = BootstrapPluginResultPayload(
-            plugin_id=payload.plugin_id,
-            configured=True,
-            session_token=self._config.session_token,
-        )
-        return envelope.make_response(payload=result.model_dump())
+        result = {
+            "plugin_id": payload.plugin_id,
+            "configured": True,
+            "session_token": self._config.session_token,
+        }
+        return envelope.make_response(payload=result)
 
     async def _handle_register_components(self, envelope: Envelope) -> Envelope:
         payload = RegisterPluginPayload(**envelope.payload)
