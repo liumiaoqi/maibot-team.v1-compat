@@ -14,9 +14,10 @@ from .component_bridge import ComponentBridge
 from .config import CompatConfig
 
 
-def create_plugin() -> "V1CompatPlugin":
+def create_plugin() -> type[V1CompatPlugin]:
     """插件入口工厂。"""
-    return V1CompatPlugin()
+    
+    return V1CompatPlugin
 
 
 class V1CompatPlugin(MaiBotPlugin):
