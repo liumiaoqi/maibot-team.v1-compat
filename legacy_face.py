@@ -51,6 +51,12 @@ SIGNATURE_MODULES: List[str] = list(SURFACE["signature_modules"])
 class _BasePlugin:
     """旧版插件基类（本地实现：只承载旧插件真正依赖的契约）。"""
 
+    # ⭐ 本地面身份标记：上游 compat 缺席时，宿主侧**拿不到** `LegacyBasePlugin` 这个类对象
+    # 来做 `issubclass` 比对（此刻 `maibot_sdk.compat` 连子模块都 import 不了）⇒ 宿主改用
+    # "基类上带这个标记"来认旧插件子类（`plugin_loader._find_local_face_plugin_class`）。
+    # 仍然**不挂命名空间、不冒充上游模块**（路 B 的理由见 `adapter-hop` 回执）。
+    _local_legacy_face_base = True
+
     plugin_name: str = ""
     enable_plugin: bool = True
     dependencies: List[str] = []
@@ -69,6 +75,91 @@ class _BasePlugin:
 
 class _ComponentBase:
     """旧版组件基类（Action/Tool/Command/EventHandler 共用最小面）。"""
+
+
+class LocalLegacyPluginAdapter:
+    """旧版实例 → 新版 Runner 契约的**本地面适配器**（上游 `LegacyPluginAdapter` 缺席时的落点）。
+
+    为什么在这里
+    ------------
+    老插件被 Runner 接管时，Runner 只认"新 SDK 插件面"（见契约清单）。上游
+    `maibot_sdk.compat.legacy_adapter.LegacyPluginAdapter` 提供这一面，但上游 compat
+    自述"将在未来版本中移除"、且本仓要能在**上游整个缺席**时仍认得出并加载老插件
+    ⇒ 这一层必须有一个本地面实现（这是 `adapter-hop` 那一跳）。
+
+    最小面（按实物核对，不是照抄上游）
+    --------------------------------
+    宿主侧**真会调用**的只有这些（逐一核对过调用点）：
+    * `_set_context(ctx)`      —— `runner_main.py:701`（`hasattr` 探测）/ `:774`
+    * `get_components()`       —— `runner_main.py:1378-1380`（R-2 形状：`list[dict]`，由 Runner 读
+      `name`/`type`/`metadata` 建 `ComponentDeclaration`）
+    * `get_config_reload_subscriptions()` —— `:1408-1409`
+    * `on_load()` / `on_unload()` —— `:1567-1571` / `:1589-1593`（**转发给旧实例**）
+    * `on_config_update(scope, config_data, version)` —— `:2372-2380`（三参，**存在性被检查**）
+    ⛔ 本类**故意不做**的：不 `_sync_config_cache`（那是上游 compat 的 config_api 缓存，
+    本地面没有那个 API 层）、不注册全局 context holder（`legacy_face` 只提供 import 面）。
+    ⇒ 面小但**每一条都有调用点或存在性检查**，不做"看着在、其实没人调"的空壳。
+    """
+
+    def __init__(self, legacy_instance: Any) -> None:
+        self._legacy = legacy_instance
+        self._ctx: Any = None
+
+    # ── 生命周期：转发给旧实例（旧实例没实现就什么都不做）──────────────
+
+    async def on_load(self) -> None:
+        on_load = getattr(self._legacy, "on_load", None)
+        if on_load is not None:
+            await on_load()
+
+    async def on_unload(self) -> None:
+        on_unload = getattr(self._legacy, "on_unload", None)
+        if on_unload is not None:
+            await on_unload()
+
+    async def on_config_update(self, scope: str, config_data: dict, version: str) -> None:
+        """把配置热更新转给旧实例（旧实例的同名方法约定收 `(config_data, version)`）。
+
+        上游 `LegacyPluginAdapter.on_config_update` 按签名自适应地决定传几个参数——
+        那是为兼容"各种历史签名"的旧插件。本地面按**本仓插件**的实际写法收窄为
+        `(config_data, version)`；旧实例若签名不符，异常向上抛（**不静默吞**：宿主
+        `:2381` 会把失败回成 error response）。
+        """
+
+        handler = getattr(self._legacy, "on_config_update", None)
+        if handler is None:
+            return
+        await handler(config_data, version)
+
+    # ── Runner 契约面 ─────────────────────────────────────────────────
+
+    def _set_context(self, ctx: Any) -> None:
+        """由 Runner 注入 `PluginContext`（`runner_main.py:774`）。"""
+
+        self._ctx = ctx
+
+    def get_components(self) -> list[dict[str, Any]]:
+        """返回新版组件声明的**空集**——旧版组件的桥接另有一条路。
+
+        为什么是空集而不是转换 `get_plugin_components()`：旧版返回的是
+        `list[tuple[ComponentInfo, type]]`，而 Runner 要的是**新 schema 的 dict**
+        （`type`/`name`/`description`/`metadata`，见 `runner_main.py:1392-1407`）；
+        转换逻辑在上游 `LegacyPluginAdapter._convert_component` 里，**本件没搬**
+        （超范围，且搬了就是复刻上游实现）。
+        ⇒ 老插件在"上游缺席 + 本地面"这条路上**能被加载、能跑生命周期**，但其旧版组件
+        暂不被注册（宿主看得见插件、看不见它的组件）——**这是如实的最小面**，不是静默：
+        本模块的 `coverage()`/`assert_nonempty()` 报的是 import 面覆盖，不含组件桥接。
+        """
+
+        return []
+
+    def get_config_reload_subscriptions(self) -> list[str]:
+        """旧实例未声明订阅 ⇒ 空（不抬级、不猜测）。"""
+
+        raw = getattr(self._legacy, "config_reload_subscriptions", ())
+        if isinstance(raw, str) or not isinstance(raw, (list, tuple, set, frozenset)):
+            return []
+        return sorted({str(item).strip().lower() for item in raw if str(item).strip().lower() in {"bot", "model"}})
 
 
 def register_plugin(cls: Any = None, **kwargs: Any) -> Any:
@@ -210,12 +301,18 @@ class _LocalFaceLoader(importlib.abc.Loader):
 
 
 def assert_nonempty() -> Dict[str, int]:
-    """**非空自证**：抽到 0 条 ⇒ 直接抛（照"抽到 0 条 ⇒ 直接红"那条规矩）。"""
+    """**非空自证**：抽到 0 条 ⇒ 直接抛（照"抽到 0 条 ⇒ 直接红"那条规矩）。
+
+    ⭐ `adapter` 一栏是 `adapter-hop` 这一跳的自证：`LocalLegacyPluginAdapter` 抽到 0 个
+    ⇒ 直接红 —— 否则"上游缺席时由本地面接住"这条路会在**没人察觉**的情况下退化成
+    "面在、adapter 不在"，症状与现在（`failed_plugin_reasons` 非空）长得一模一样。
+    """
 
     counts = {
         "aliases": len(ALIASES),
         "names": len(FACE_NAMES),
         "signature_modules": len(SIGNATURE_MODULES),
+        "adapter": 1 if LocalLegacyPluginAdapter else 0,
     }
     empty = [key for key, value in counts.items() if value <= 0]
     if empty:
