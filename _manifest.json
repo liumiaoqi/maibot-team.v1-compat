@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "id": "maibot-team.v1-compat",
   "name": "V1 Compatibility Layer",
-  "version": "1.0.0",
+  "version": "1.0.0", "license": "MIT",
   "description": "Bridge V1 plugins to V4 runtime via generalized dispatch",
   "author": {"name": "MaiBot Team"},
   "scopes": [
