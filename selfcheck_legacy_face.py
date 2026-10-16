@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import importlib
 import importlib.util
-import logging
+import logging  # ruff: ignore[TID251]  自检需要 stdlib Handler 捕获记录，非生产日志入口
 import sys
 from pathlib import Path
 
