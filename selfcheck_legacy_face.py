@@ -66,8 +66,21 @@ def item1_nonempty_and_reverse() -> None:
 
     _line("件① 非空自证 + (乙) 反向自检")
     counts = legacy_face.assert_nonempty()
-    print(f"  抽到: 别名 {counts['aliases']} 条 · 名字 {counts['names']} 个 · 签名模块 {counts['signature_modules']} 个")
+    print(
+        f"  抽到: 别名 {counts['aliases']} 条 · 名字 {counts['names']} 个 · "
+        f"签名模块 {counts['signature_modules']} 个 · adapter {counts['adapter']} 个"
+    )
     print(f"  覆盖: {legacy_face.coverage()}")
+
+    # ⭐ `adapter-hop` 那一跳的自证（判据 (丁) 的第二栏）：本地面若抽不到 adapter，这条路会在
+    # "面在、adapter 不在"的形态下静默退化——症状和没修一模一样（`failed_plugin_reasons` 非空）。
+    assert counts["adapter"] > 0, "本地面抽不到 LocalLegacyPluginAdapter ⇒ '上游缺席时接住老插件'这条路已瞎"
+    adapter_cls = legacy_face.LocalLegacyPluginAdapter
+    probe = adapter_cls(legacy_face._BasePlugin())
+    print(
+        f"  [adapter 自证] LocalLegacyPluginAdapter 可构造 ✓ · 持有旧实例 = {type(probe._legacy).__name__} · "
+        f"契约面 = {sorted(name for name in ('_set_context', 'get_components', 'get_config_reload_subscriptions', 'on_load', 'on_unload', 'on_config_update') if hasattr(probe, name))}"
+    )
 
     keep = dict(legacy_face.ALIASES)
     try:
