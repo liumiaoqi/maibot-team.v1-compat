@@ -31,6 +31,30 @@ if TYPE_CHECKING:
 logger = get_logger("plugin_runtime.v1_compat.bridge")
 
 
+def _forward_runner_log(entry: dict[str, Any]) -> None:
+    """把 runner 侧的一条日志按**原级别**转发到宿主（**不降级**）。
+
+    ⚠️ 原实现是 `logger.info` 一把梭 ⇒ runner 的 `warning` 到宿主降成通知 ⇒
+    在"只看 warning 及以上"的视图里**看不见**（半个静默）。
+    级别**只按字段取**、缺失才回落 info，**不整体上抬**（否则等于用噪声换可见）。
+    """
+
+    level = str(entry.get("level") or entry.get("levelname") or entry.get("level_name") or "info").lower()
+    emit = _LEVEL_TO_METHOD.get(level, logger.info)
+    emit("[compat:v1] %s", entry.get("message", ""))
+
+
+_LEVEL_TO_METHOD = {
+    "debug": logger.debug,
+    "info": logger.info,
+    "warning": logger.warning,
+    "warn": logger.warning,
+    "error": logger.error,
+    "critical": logger.critical,
+    "fatal": logger.critical,
+}
+
+
 class CompatBridge:
     """V1 IPC 通信桥 — 在 V4 Runner 进程内充当 V1 Host 角色。
 
@@ -189,7 +213,7 @@ class CompatBridge:
     async def _handle_log_batch(self, envelope: Envelope) -> Envelope:
         entries = envelope.payload.get("entries", [])
         for entry in entries:
-            logger.info("[compat:v1] %s", entry.get("message", ""))
+            _forward_runner_log(entry)
         return envelope.make_response(payload={"acknowledged": True})
 
     async def _handle_capability_call(self, envelope: Envelope) -> Envelope:
