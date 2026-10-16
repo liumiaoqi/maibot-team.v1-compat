@@ -31,6 +31,49 @@ if TYPE_CHECKING:
 logger = get_logger("plugin_runtime.v1_compat.bridge")
 
 
+def build_runner_env(
+    listen_port: int,
+    session_token: str,
+    plugin_dirs: "list[str]",
+    host_version: str,
+    runner_group: str,
+    base_env: "dict[str, str]",
+) -> "dict[str, str]":
+    """构造 V1 Runner 子进程的环境变量（producer 侧真源）。
+
+    ⚠️ `MAIBOT_PLUGIN_DIRS` 必须按 `os.pathsep` 拼 —— 消费侧就按它切
+    （`src/plugin_runtime/runner/runner_main.py:2584`：
+    `plugin_dirs = [d for d in plugin_dirs_str.split(os.pathsep) if d]`）。
+    Windows 的 `os.pathsep` 是 `;`、POSIX 是 `:`；**都不是 `,`**。
+
+    旧实现是 `",".join(...)` —— 多目录会被消费侧当成**一个**目录（插件静默发现不到），
+    而**单目录时两种拼法等价** ⇒ 这正是它长期没被发现的原因。
+    两侧口径现由用例钉住：`test_plugin_dirs_env_contract_matches_runner_split`
+    （断言"按 `os.pathsep` 切回来 == 原列表"）与症状级的
+    `test_two_plugin_dirs_are_both_discovered`（两个目录必须都发现）。
+
+    Args:
+        listen_port: 宿主 RPCServer 实际监听的端口。
+        session_token: 本次会话令牌（与宿主握手用）。
+        plugin_dirs: 插件目录列表（≥1）。
+        host_version: 宿主版本（runner 侧做兼容门）。
+        runner_group: runner 分组标识。
+        base_env: 基底环境（通常是 `os.environ.copy()`）——本函数在其**副本**上覆盖。
+
+    Returns:
+        dict: 供 `create_subprocess_exec(env=...)` 直接使用的完整环境变量字典。
+    """
+    env = dict(base_env)
+    env["MAIBOT_IPC_ADDRESS"] = f"127.0.0.1:{listen_port}"
+    env["MAIBOT_SESSION_TOKEN"] = session_token
+    env["MAIBOT_PLUGIN_DIRS"] = os.pathsep.join(plugin_dirs)
+    env["MAIBOT_HOST_VERSION"] = host_version
+    env["MAIBOT_RUNNER_GROUP"] = runner_group
+    env["MAIBOT_EXTERNAL_PLUGIN_IDS"] = ""
+    env["MAIBOT_BLOCKED_PLUGIN_REASONS"] = "{}"
+    return env
+
+
 def _forward_runner_log(entry: dict[str, Any]) -> None:
     """把 runner 侧的一条日志按**原级别**转发到宿主（**不降级**）。
 
@@ -153,14 +196,14 @@ class CompatBridge:
 
     async def _spawn_runner(self, listen_port: int) -> None:
         """启动 V1 Runner 子进程。"""
-        env = os.environ.copy()
-        env["MAIBOT_IPC_ADDRESS"] = f"127.0.0.1:{listen_port}"
-        env["MAIBOT_SESSION_TOKEN"] = self._config.session_token
-        env["MAIBOT_PLUGIN_DIRS"] = ",".join(self._config.plugin_dirs)
-        env["MAIBOT_HOST_VERSION"] = self._config.host_version
-        env["MAIBOT_RUNNER_GROUP"] = self._config.runner_group
-        env["MAIBOT_EXTERNAL_PLUGIN_IDS"] = ""
-        env["MAIBOT_BLOCKED_PLUGIN_REASONS"] = "{}"
+        env = build_runner_env(
+            listen_port=listen_port,
+            session_token=self._config.session_token,
+            plugin_dirs=self._config.plugin_dirs,
+            host_version=self._config.host_version,
+            runner_group=self._config.runner_group,
+            base_env=os.environ.copy(),
+        )
 
         self._runner_process = await asyncio.create_subprocess_exec(
             sys.executable, "-m", "src.plugin_runtime.runner.runner_main",
