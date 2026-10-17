@@ -97,6 +97,28 @@ class ComponentType(Enum):
         return self.value
 
 
+class ActionActivationType(Enum):
+    """旧版 Action 激活类型（取值与 SDK 兼容层一致：小写）。
+
+    ⭐ 为什么它**必须先于 `ActionInfo`** 落到本地面（前置核对结论，不是顺手搬）：
+    `ActionInfo` 的三个 `*_activation_type` 字段默认值写的就是 `ActionActivationType.ALWAYS`
+    —— 那是**类体求值**、不是"用到才求"，若本类还是 stub（`_make_stub` 出来的类没有
+    `ALWAYS` 这个属性）⇒ `AttributeError` 发生在 `import legacy_face` 那一刻 ⇒ 整个本地面
+    **装不上**（症状是"老插件又变成 `No module named 'src.plugin_system'`"，与"兜底面没写"
+    长得一模一样）。故它与 `ComponentType` / `ToolParamType` 同级：先真枚举、再谈字段。
+
+    取值/`__str__` 与上游 `maibot_sdk/compat/base/component_types.py:25-32` 逐字对齐。
+    """
+
+    NEVER = "never"
+    ALWAYS = "always"
+    RANDOM = "random"
+    KEYWORD = "keyword"
+
+    def __str__(self) -> str:
+        return self.value
+
+
 class ToolParamType(Enum):
     """旧版 Tool 参数类型（v2 侧改由 JSON-schema 表示 ⇒ 见"语义上真不同"第 ② 条）。"""
 
@@ -140,15 +162,25 @@ class ComponentInfo:
 
 @dataclasses.dataclass
 class ActionInfo(ComponentInfo):
-    """旧版 Action 描述。
+    """旧版 Action 描述（字段/默认值/次序照上游 `component_types.py:96-110` **全带 10 个**）。
 
-    ⚠️ 激活面**不在这里**：`ActionActivationType` / `ChatMode` 仍是 stub
-    （那是"语义上真不同"第 ① 条：v1 类属性+枚举 vs v2 参数+描述生成 ⇒ 非一一映射）。
+    ⚠️ 激活面**这一半现在真落了**：三个 `*_activation_type` 的默认值指向上面的
+    `ActionActivationType`（故本类要求它先实现，见那个类的 docstring）。
+    ⚠️ 仍**不在这里**的是 `ChatMode`（它不在 `ActionInfo` 的字段里，`ActionInfo` 不需要它）。
+    ⚠️ 字段**次序照上游**（不是"先本地已有的四个再补"）：老插件按位置构造时
+    （`ActionInfo("n", ComponentType.ACTION, "d", True, "p", False, {}, [], [], …)`）
+    次序错一位就是**静默错字段**，比 `TypeError` 更难查。
     """
 
     action_parameters: Dict[str, str] = dataclasses.field(default_factory=dict)
     action_require: List[str] = dataclasses.field(default_factory=list)
     associated_types: List[str] = dataclasses.field(default_factory=list)
+    focus_activation_type: ActionActivationType = ActionActivationType.ALWAYS
+    normal_activation_type: ActionActivationType = ActionActivationType.ALWAYS
+    activation_type: ActionActivationType = ActionActivationType.ALWAYS
+    random_activation_probability: float = 0.0
+    activation_keywords: List[str] = dataclasses.field(default_factory=list)
+    keyword_case_sensitive: bool = False
     parallel_action: bool = False
 
     def __post_init__(self) -> None:
@@ -552,6 +584,7 @@ _IMPLEMENTED: Dict[str, Any] = {
     "BaseEventHandler": _ComponentBase,
     # ── 组件描述载体（`component-bridge` 那一跳：由 stub 升为真数据）──────────────
     "ComponentType": ComponentType,
+    "ActionActivationType": ActionActivationType,
     "ComponentInfo": ComponentInfo,
     "ActionInfo": ActionInfo,
     "CommandInfo": CommandInfo,
@@ -571,18 +604,35 @@ _IMPLEMENTED: Dict[str, Any] = {
 #: ⭐ `assert_nonempty` 的**组件栏**：这一跳**已实现**的描述载体（判据 (丁)：0 条 ⇒ 直接红）。
 #: 为什么单列一栏：`names` 那一栏是"面上有多少个名字"，**不区分真实现与 stub** ⇒ 老插件
 #: "构造描述对象那一步"全体抛错时，`names`/`aliases` 两栏照样是满的（看着全绿、其实全瞎）。
-#: ⚠️ 只列**本轮真落地的 7 个**：`ActionActivationType` / `ChatMode` 仍是 stub，**不进这一栏**
-#: —— 本栏的判据是"实现没实现"，把它们算进来就是**恒假**的红（第一版就这么错过一次：
+#: ⚠️ 只列**真落地的 8 个**：`ChatMode` 仍是 stub，**不进这一栏**
+#: —— 本栏的判据是"实现没实现"，把它算进来就是**恒假**的红（第一版就这么错过一次：
 #: `assert_nonempty()` 每次都抛 ⇒ 兜底面整块装不上 ⇒ 现场症状是"老插件又变成
 #: `No module named 'src.plugin_system'`"，与"兜底面没写"长得一模一样）。
+#: ⚠️ `ActionActivationType` 是**第 3 片（ActionInfo 全带 10 个字段）**才进来的：`ActionInfo`
+#: 的字段默认值指它 ⇒ 它不真，`ActionInfo` 连类体都过不去（见那个类的 docstring）。
 _COMPONENT_CARRIERS: tuple[str, ...] = (
     "ComponentType",
+    "ActionActivationType",
     "ComponentInfo",
     "ActionInfo",
     "CommandInfo",
     "ToolInfo",
     "EventHandlerInfo",
     "ToolParamType",
+)
+
+#: ⭐ `assert_nonempty` 的**组件描述对象栏**（第 3 片新增）：`*Info` 那四个类（不含基类 `ComponentInfo`）。
+#: 为什么另立一栏：`components` 那一栏把**枚举**（`ComponentType` / `ActionActivationType` /
+#: `ToolParamType`）与**数据载体**混在一起数 ⇒ 少搬**一个 `*Info`** 时那个数字只从 8 掉到 7，
+#: 与"某一类还没立项"**不可分辨**。老插件构造组件的第一句就是 `XxxInfo(...)` ⇒ "少一个"必须是
+#: **直接红**，不能只靠人盯打印出来的数字（故下面有 `missing_infos` 那条具名断言）。
+#: ⚠️ 计数一律**从 `_IMPLEMENTED` 里数**（`counts["component_infos"]`），⛔ 不写死 4：
+#: 写死的数字在"少搬一个"时照样是 4，自证就变成了一句谎。
+_COMPONENT_INFOS: tuple[str, ...] = (
+    "ActionInfo",
+    "ToolInfo",
+    "CommandInfo",
+    "EventHandlerInfo",
 )
 
 
@@ -710,6 +760,11 @@ def assert_nonempty() -> Dict[str, int]:
 
     ⭐ 另有一条**内容层**的自证（同在 (丁) 名下）：`_REQUIRED_MAPPINGS` 里每一条都要真的在
     `_V1_TO_V2_COMPONENT_TYPE` 里对上值 —— 条数 > 0 只挡"全空"，挡不住"加过的那一类悄悄退回"。
+
+    ⭐ `component_infos` 一栏（第 3 片）：`*Info` 那四个类的**已实现条数**，值从 `_IMPLEMENTED`
+    现数（⛔ 不写死 4）⇒ "少搬一个"时它从 4 掉到 3，"自证跟着实现变，不是写死"。
+    ⚠️ 光有那一栏**还不算红**（3 > 0 过得了"非空"这一关）⇒ 配套 `missing_infos` 具名断言：
+    四个 `*Info` 缺任何一个都直接抛。
     """
 
     counts = {
@@ -718,6 +773,8 @@ def assert_nonempty() -> Dict[str, int]:
         "signature_modules": len(SIGNATURE_MODULES),
         "adapter": 1 if LocalLegacyPluginAdapter else 0,
         "components": len([name for name in _COMPONENT_CARRIERS if name in _IMPLEMENTED]),
+        #: ⭐ `*Info` 那四个类：**从 `_IMPLEMENTED` 里数**（写死一个 4 就等于"少搬了也照样绿"）。
+        "component_infos": sum(1 for name in _COMPONENT_INFOS if name in _IMPLEMENTED),
         "mappable_component_types": len(_V1_TO_V2_COMPONENT_TYPE),
     }
     empty = [key for key, value in counts.items() if value <= 0]
@@ -728,6 +785,13 @@ def assert_nonempty() -> Dict[str, int]:
         raise LocalFaceGapError(
             f"组件描述载体缺 {len(missing_carriers)} 个：{missing_carriers}"
             " —— 老插件构造描述对象那一步会当场抛，本地面等于'看着在、其实构造不了组件'"
+        )
+    missing_infos = [name for name in _COMPONENT_INFOS if name not in _IMPLEMENTED]
+    if missing_infos:
+        raise LocalFaceGapError(
+            f"组件描述对象缺 {len(missing_infos)} 个：{missing_infos}"
+            " —— 老插件构造组件的第一句就是 `XxxInfo(...)`，缺一个就等于那一类组件全废"
+            "（计数栏此时已从 4 掉下来：自证跟着实现变，不是写死）"
         )
     missing_mappings = [
         f"{v1}→{v2}"

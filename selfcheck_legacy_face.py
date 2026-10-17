@@ -78,6 +78,7 @@ def item1_nonempty_and_reverse() -> None:
     )
     print(
         f"  ⭐ 组件栏（判据 (丁)，0 条即红）: 描述载体 {counts['components']} 个 · "
+        f"组件描述对象（*Info，从 `_IMPLEMENTED` 现数）{counts['component_infos']} 个 · "
         f"已立项可翻的类别 {counts['mappable_component_types']} 类 "
         f"（内容层：{legacy_face._V1_TO_V2_COMPONENT_TYPE}）"
     )
