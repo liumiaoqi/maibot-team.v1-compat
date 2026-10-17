@@ -23,7 +23,9 @@
 "**构造描述对象那一步**"就抛 `LocalFaceGapError` ⇒ 适配器 `get_components()` 自然给不出东西。
 这一跳把它们做成**真数据**（字段名/默认值/SDK 语义对齐运行期 `maibot_sdk.compat.base.component_types`），
 并让 `LocalLegacyPluginAdapter.get_components()` **真翻**出 v2 dict。
-⚠️ 只翻得动**已立项**的那一类（见 `_V1_TO_V2_COMPONENT_TYPE`）；其余类别**具名出声**，⛔ 不静默给空。
+⚠️ 只翻得动**已立项**的那几类（见 `_V1_TO_V2_COMPONENT_TYPE`：现为 `command` / `event_handler`）；
+其余类别**具名出声**，⛔ 不静默给空。`metadata` 一律按**该类在 v2 侧真读的键**给（不是把 v1 的字段
+原样倒过去）—— 逐类的读侧出处写在 `LocalLegacyPluginAdapter._convert_component` 的 docstring 里。
 """
 
 from __future__ import annotations
@@ -179,7 +181,13 @@ class ToolInfo(ComponentInfo):
 
 @dataclasses.dataclass
 class EventHandlerInfo(ComponentInfo):
-    """旧版 EventHandler 描述。"""
+    """旧版 EventHandler 描述（⭐ 第 2 片立项：`event_handler` → `EVENT_HANDLER`）。
+
+    ⚠️ `event_type` 的默认值是**字符串** `"on_message"`，上游 SDK 那份是枚举 `EventType.ON_MESSAGE`
+    —— 两者取值相同（`str(EventType.ON_MESSAGE) == "on_message"`）；本地面里 `EventType` **仍是 stub**
+    （老插件写 `event_type = EventType.ON_MESSAGE` 会在原地看到缺口），故默认值用字符串。
+    转换时一律取 `.value`（见 `_v1_event_type_value`），两种形态都翻得动。
+    """
 
     event_type: Any = "on_message"
     intercept_message: bool = False
@@ -192,9 +200,63 @@ class EventHandlerInfo(ComponentInfo):
 
 #: ⭐ v1 组件类型（**小写取值**）→ v2 声明 `type`（**大写**，对齐宿主 `ComponentTypes`）。
 #: 只列**已立项**的：别的一律由 `_convert_component` 具名出声（⛔ 不静默给空）。
+#: 逐类放行（放行之前先读**v2 侧真读哪些键**，不是把 v1 的字段原样倒过去）：
+#: * `command`       —— `component-bridge` 第 1 片；读侧 `host/component_registry.py:155-161`；
+#: * `event_handler` —— 第 2 片（本片）；读侧 `:257-259`（`EventHandlerEntry.__init__` 逐字取
+#:   `event_type` / `weight` / `intercept_message`）+ `:1092`（按 `event_type` 比）+ `:1094`（按 `weight` 排）。
 _V1_TO_V2_COMPONENT_TYPE: Dict[str, str] = {
     "command": "COMMAND",
+    "event_handler": "EVENT_HANDLER",
 }
+
+#: ⭐ 已立项映射的**内容层**自证（判据 (丁) 的第二层；第一层是"条数 > 0"，见 `assert_nonempty`）。
+#: 为什么光数条数不够：`len(...)` 从 2 掉回 1，与"这一类还没立项"**不可分辨**；
+#: 而 v1 的 `ComponentType` 取值域是**闭集** ⇒ 每一类只有两种合法状态：**在表里且值对得上** v2 的
+#: `ComponentTypes`，或者**明说没立项**（由 `_convert_component` 具名出声）。
+#: ⚠️ 加一类就往这里加一条：这条断言管的是"**放过的那一类不会悄悄退回**"。
+_REQUIRED_MAPPINGS: Dict[str, str] = {
+    "command": "COMMAND",
+    "event_handler": "EVENT_HANDLER",
+}
+
+
+def _from_instance_then_info(instance: Any, comp_info: Any, attr: str, default: Any) -> Any:
+    """取字段值：**实例（类属性）优先，没写才回落到描述对象**（两边都没有 ⇒ `default`）。
+
+    ⚠️ "没写"按 `None` 判，**不按真值判**：`intercept_message = False` / `weight = 0` 是**写得明明白白
+    的取值**；按真值判会把它们当成"没写"、被描述对象里的值盖掉 —— 那就是"插件说了不算"。
+
+    与上一片 `command_pattern` 同一条口径（老插件两种写法都有：类属性声明 / 直接构造 `*Info`）。
+    ⚠️ 上游 `maibot_sdk.compat.legacy_adapter._convert_component` **只认实例**（`:264-276`）——
+    本地面多这一层回落是**有意的**：v1 的工厂 `BaseEventHandler.get_handler_info()` 就是把类属性抄进
+    `*Info`，两种写法在老插件里都出现；两条路都给值时结果相同（故与上游行为一致）。
+    """
+
+    value = getattr(instance, attr, None)
+    if value is None:
+        value = getattr(comp_info, attr, None)
+    return default if value is None else value
+
+
+def _v1_event_type_value(raw: Any) -> str:
+    """v1 的 `event_type` → **v2 的取值域**（小写字符串，`EventType` 那套）。
+
+    * 两种形态都有：枚举（上游 compat 在场时是 `EventType.ON_MESSAGE`）/ 裸串 `"on_message"`
+      ⇒ 一律取 `.value`。⚠️ 比上游那行 `str(getattr(instance, "event_type", "on_message"))` 稳：
+      上游靠 v1 枚举自带 `__str__ = value`，**件外的普通 `Enum`** 会被 `str()` 成
+      `'EventType.ON_MESSAGE'` 这种垃圾串（注册得上、永不触发）。
+    * 空串按**没写**处理（v1 基类默认就是 `EventType.ON_MESSAGE`）⇒ 回落 `"on_message"`：
+      宁可落到 v1 的默认值上，也不落一个"注册成功、永不触发"的空值。
+      （⚠️ 唯一一处与上游的**有意**差异：上游会把空串原样放进 metadata。写进回执的覆盖边界。）
+    * 本函数**不做**大小写归一：宿主 `component_registry.py:1092` 是 `comp.event_type == event_type`
+      **逐字**比（不像 `component_type` 那层有 `_normalize_component_type` 的 `.upper()`），故口径
+      与上游 compat 保持一致（都不归一）——`"ON_MESSAGE"` 这种写法两面都一样"注册得上、永不触发"。
+    """
+
+    if raw is None:
+        return "on_message"
+    text = str(getattr(raw, "value", raw)).strip()
+    return text or "on_message"
 
 
 # ── 已实现的名字（老插件在本仓真会用到的那些）─────────────────────────────────
@@ -302,9 +364,11 @@ class LocalLegacyPluginAdapter:
         `ComponentDeclaration.metadata`。
 
         ⭐ 与 `adapter-hop` 那一版的关键差别：那一版返回**空集**（"宿主看得见插件、看不见组件"），
-        理由是"转换逻辑在上游 `_convert_component`、本件没搬"；本跳把**已立项的一类**
-        （`CommandInfo` → `COMMAND`，见 `_V1_TO_V2_COMPONENT_TYPE`）真搬过来 ⇒ 老插件的
-        **命令类组件**从此真能被注册。
+        理由是"转换逻辑在上游 `_convert_component`、本件没搬"；本跳把**已立项的那几类**
+        （`CommandInfo` → `COMMAND`；`EventHandlerInfo` → `EVENT_HANDLER`，见 `_V1_TO_V2_COMPONENT_TYPE`）
+        真搬过来 ⇒ 老插件的**命令类 / 事件处理器组件**从此真能被注册。
+        ⚠️ 注册得上 ≠ 调得动：调用路由（`metadata["handler_name"]` → 实例上那个可调用）仍是**下一跳**，
+        本件只做**声明面**（与上一片同边界）。
 
         ⛔ **翻不动的类别不许静默跳过**（具名出声）：
         上游那一版对未知类型只 `logger.warning` + `return None`（组件凭空消失）；本地面照
@@ -382,8 +446,22 @@ class LocalLegacyPluginAdapter:
     def _convert_component(comp_info: Any, instance: Any) -> dict[str, Any]:
         """单个 v1 描述对象 → v2 声明 dict（**只认已立项的类型**）。
 
+        `metadata` **不是**把 v1 的字段原样倒过去，而是按**该类在 v2 侧真读的键**给
+        （读侧出处逐类列在下面；改这里之前先去读那一处）：
+
+        * `COMMAND` ⇒ `command_pattern` —— 读侧 `host/component_registry.py:155-161`
+          （`CommandEntry`：`metadata.get("aliases", [])` + `re.compile(metadata["command_pattern"])`）。
+        * `EVENT_HANDLER` ⇒ `event_type` / `weight` / `intercept_message` —— 读侧 `:257-259`
+          （`EventHandlerEntry.__init__` 逐字取这三个键）+ `:1092`（`get_event_handlers` 按
+          `event_type` 比）+ `:1094`（按 `weight` 降序排）。
+        * 两类共有 `handler_name` —— 读侧 `runner/runner_main.py:1389`：拿它建
+          `meta.component_handlers` 映射；缺了会**静默回落**成组件名（故这里显式给组件名，
+          与上游 compat 不给该键**等效**）。`legacy=True` 是本地面身份标记。
+
+        取值口径：**实例（类属性）优先，没写才回落到描述对象** —— 见 `_from_instance_then_info`。
+
         Raises:
-            LocalFaceGapError: 类型未立项，或已立项但缺必填字段。
+            LocalFaceGapError: 类型未立项、已立项但字段翻不成 v2 声明（**一律具名**，不静默跳过）。
         """
 
         raw_type = str(getattr(getattr(comp_info, "component_type", ""), "value", "") or "").strip().lower()
@@ -397,18 +475,44 @@ class LocalLegacyPluginAdapter:
 
         name = str(getattr(comp_info, "name", "") or "").strip()
         description = str(getattr(comp_info, "description", "") or "").strip()
-        metadata: Dict[str, Any] = {
-            # 实例上没写就回落到描述对象（老插件两种写法都有）
-            "command_pattern": str(
-                getattr(instance, "command_pattern", "") or getattr(comp_info, "command_pattern", "") or ""
-            ),
-            "handler_name": name,
-            "legacy": True,
-        }
+        try:
+            if raw_type == "command":
+                metadata: Dict[str, Any] = {
+                    "command_pattern": str(
+                        _from_instance_then_info(instance, comp_info, "command_pattern", "") or ""
+                    ),
+                }
+                description = description or str(getattr(instance, "command_description", "") or "")
+            elif raw_type == "event_handler":
+                metadata = {
+                    "event_type": _v1_event_type_value(
+                        _from_instance_then_info(instance, comp_info, "event_type", None)
+                    ),
+                    "intercept_message": bool(
+                        _from_instance_then_info(instance, comp_info, "intercept_message", False)
+                    ),
+                    # 收成 int：v2 那侧要拿它 `sort(key=..., reverse=True)`（`component_registry.py:1094`）
+                    # ⇒ 非数会**在派发时才炸**（离现场很远）；这里当场具名。
+                    "weight": int(_from_instance_then_info(instance, comp_info, "weight", 0)),
+                }
+                description = description or str(getattr(instance, "handler_description", "") or "")
+            else:  # 表里已立项但这里没有分支 ⇒ 具名（加类时漏改这里，不该静默走成别的类）
+                raise LocalFaceGapError(
+                    f"组件 {name or '?'} 的类型 {raw_type!r} 已在 `_V1_TO_V2_COMPONENT_TYPE` 里立项，"
+                    "但 `_convert_component` 没有它的分支（加类时漏了这一步）⇒ 不静默跳过"
+                )
+        except (TypeError, ValueError) as exc:
+            raise LocalFaceGapError(
+                f"组件 {name or '?'}（{raw_type}）的字段翻不成 v2 声明（{type(exc).__name__}: {exc}）"
+                " ⇒ 不静默跳过（否则会得到'注册成功、字段却是空的'假绿）"
+            ) from exc
+
+        metadata["handler_name"] = name
+        metadata["legacy"] = True
         return {
             "name": name,
             "type": component_type,
-            "description": description or str(getattr(instance, "command_description", "") or ""),
+            "description": description,
             "metadata": metadata,
         }
 
@@ -603,6 +707,9 @@ def assert_nonempty() -> Dict[str, int]:
     为什么这条不能靠 `names` 那一栏兜：老插件在 `get_plugin_components()` 里"构造描述对象"
     那一步若全体抛错，`names`/`aliases` 两栏**照样是满的**（stub 也占名字位）⇒ 只数名字
     等于"看着全绿、其实构造不出任何组件"。
+
+    ⭐ 另有一条**内容层**的自证（同在 (丁) 名下）：`_REQUIRED_MAPPINGS` 里每一条都要真的在
+    `_V1_TO_V2_COMPONENT_TYPE` 里对上值 —— 条数 > 0 只挡"全空"，挡不住"加过的那一类悄悄退回"。
     """
 
     counts = {
@@ -621,6 +728,16 @@ def assert_nonempty() -> Dict[str, int]:
         raise LocalFaceGapError(
             f"组件描述载体缺 {len(missing_carriers)} 个：{missing_carriers}"
             " —— 老插件构造描述对象那一步会当场抛，本地面等于'看着在、其实构造不了组件'"
+        )
+    missing_mappings = [
+        f"{v1}→{v2}"
+        for v1, v2 in _REQUIRED_MAPPINGS.items()
+        if _V1_TO_V2_COMPONENT_TYPE.get(v1) != v2
+    ]
+    if missing_mappings:
+        raise LocalFaceGapError(
+            f"已立项的组件类别缺 {len(missing_mappings)} 条映射：{missing_mappings}"
+            "（内容层自证：条数 > 0 挡不住'加过的那一类悄悄退回'）—— 具名出声，不静默降级"
         )
     return counts
 

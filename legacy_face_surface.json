@@ -22,8 +22,8 @@
       ]
     },
     "mappable_component_types": {
-      "implemented": ["command"],
-      "note": "v1 小写取值 → v2 大写 type；只列已立项的，其余由 _convert_component 具名出声（⛔ 不静默给空）"
+      "implemented": ["command", "event_handler"],
+      "note": "v1 小写取值 → v2 大写 type；只列已立项的（第 1 片 command · 第 2 片 event_handler），其余由 _convert_component 具名出声（⛔ 不静默给空）"
     },
     "submodules": {
       "apis": [

@@ -6,8 +6,10 @@
 * 件①(甲) 合成"上游 compat 缺席" ⇒ 本地面装上后老插件的 import 面**仍通**（贴原文）；
 * 件①(乙) 反向自检：**搬漏一条** ⇒ 该路径 import **必须出声**（`LocalFaceGapError`）；
 * 件①非空自证：清单为空 ⇒ 直接红；并打印**抽到了多少条**（35/60/24）+ ⭐ **组件栏**（判据 (丁)）；
-* 件③(甲) **组件桥**：描述载体真能构造 + `LocalLegacyPluginAdapter.get_components()` 真翻出 v2 dict；
-* 件③(丙) 反向自检：**翻不动的类别 / 没有 get_plugin_components / 载体被抹掉** 三条都必须出声；
+* 件③(甲) **组件桥**：描述载体真能构造 + `LocalLegacyPluginAdapter.get_components()` 真翻出 v2 dict
+  （第 1 片 `command`；第 2 片 `event_handler` —— 后者连**类属性 / 描述对象 / 枚举 / 大写串 / 空值**
+  五种形态一起对）；
+* 件③(丙) 反向自检：**翻不动的类别 / 没有 get_plugin_components / 载体被抹掉 / 映射被抽掉** 四条都必须出声；
 * 件②(甲) 合成 runner 侧 `warning` ⇒ 宿主侧**按 level 过滤仍能看到**（贴原文）；
 * 件②(乙) 正常 `info` **不被抬级**（否则就是"整体上抬"换可见）。
 """
@@ -18,7 +20,9 @@ import importlib
 import importlib.util
 import logging  # ruff: ignore[TID251]  自检需要 stdlib Handler 捕获记录，非生产日志入口
 import sys
+from enum import Enum
 from pathlib import Path
+from typing import Any
 
 PLUGIN_DIR = Path(__file__).resolve().parent
 REPO_ROOT = PLUGIN_DIR.parents[1]  # 宿主仓根（`src` 在这里）
@@ -74,7 +78,8 @@ def item1_nonempty_and_reverse() -> None:
     )
     print(
         f"  ⭐ 组件栏（判据 (丁)，0 条即红）: 描述载体 {counts['components']} 个 · "
-        f"已立项可翻的类别 {counts['mappable_component_types']} 类"
+        f"已立项可翻的类别 {counts['mappable_component_types']} 类 "
+        f"（内容层：{legacy_face._V1_TO_V2_COMPONENT_TYPE}）"
     )
     print(f"  覆盖: {legacy_face.coverage()}")
 
@@ -118,6 +123,20 @@ def item1_nonempty_and_reverse() -> None:
     finally:
         legacy_face.FACE_NAMES.extend(keep_names)
 
+    # ⭐ (丁) 的**内容层**反向自检：把本片新立项的那一类抽掉 ⇒ 必须红（"条数 > 0"挡不住这一手）
+    keep_mappings = dict(legacy_face._V1_TO_V2_COMPONENT_TYPE)
+    try:
+        legacy_face._V1_TO_V2_COMPONENT_TYPE.pop("event_handler")
+        try:
+            legacy_face.assert_nonempty()
+        except legacy_face.LocalFaceGapError as exc:
+            print(f"  [映射内容层的反向自检] 抽掉 event_handler ⇒ 直接红 ✓：{exc}")
+        else:
+            raise AssertionError("已立项的 event_handler 被抽掉却没红 ⇒ 那条内容级断言是恒真的")
+    finally:
+        legacy_face._V1_TO_V2_COMPONENT_TYPE.clear()
+        legacy_face._V1_TO_V2_COMPONENT_TYPE.update(keep_mappings)
+
 
 def item3_component_bridge() -> None:
     """件③（`component-bridge` 那一跳）：描述载体**真能构造** + `get_components()` **真翻**出 v2 dict。"""
@@ -128,7 +147,13 @@ def item3_component_bridge() -> None:
     for key in [k for k in sys.modules if k.startswith("src.plugin_system")]:
         del sys.modules[key]
 
-    from src.plugin_system import BasePlugin, CommandInfo, ComponentType, register_plugin  # noqa: PLC0415
+    from src.plugin_system import (  # noqa: PLC0415
+        BasePlugin,
+        CommandInfo,
+        ComponentType,
+        EventHandlerInfo,
+        register_plugin,
+    )
     from src.plugin_system.base.component_types import ToolParamType  # noqa: PLC0415
 
     print(
@@ -143,6 +168,18 @@ def item3_component_bridge() -> None:
 
         async def execute(self) -> str:
             return "pong"
+
+    class _PreProcessProbe:
+        """旧版 EventHandler 的规范写法：**类属性**声明（v1 的 `get_handler_info()` 就是抄这些）。"""
+
+        event_type = "on_message_pre_process"
+        handler_name = "pre_process_probe"
+        handler_description = "示例事件处理器"
+        weight = 5
+        intercept_message = True
+
+        async def execute(self, message: Any) -> tuple:
+            return True, True, None, None, None
 
     @register_plugin
     class BridgePlugin(BasePlugin):
@@ -159,18 +196,115 @@ def item3_component_bridge() -> None:
                     ),
                     _PingCommand,
                 ),
+                (
+                    # ⭐ 第 2 片新增的一类。event_type / weight / intercept_message **不在这里给**
+                    #   ⇒ 只能从**实例的类属性**上取（老插件的规范写法；"实例优先、没写才回落到
+                    #   描述对象"这条约定因此被真走过）
+                    EventHandlerInfo(
+                        name="pre_process_probe",
+                        component_type=ComponentType.EVENT_HANDLER,
+                        description="示例事件处理器",
+                    ),
+                    _PreProcessProbe,
+                ),
             ]
 
     adapter = legacy_face.LocalLegacyPluginAdapter(BridgePlugin())
     declarations = adapter.get_components()
     print(f"  adapter.get_components() ⇒ {declarations}")
-    assert isinstance(declarations, list) and len(declarations) == 1, declarations
-    first = declarations[0]
+    assert isinstance(declarations, list) and len(declarations) == 2, declarations
+    first, second = declarations
     assert first["name"] == "ping", first
     assert first["type"] == "COMMAND", first
     assert first["metadata"]["command_pattern"] == "^/ping", first
     assert first["metadata"]["legacy"] is True, first
     assert isinstance(first["metadata"], dict), first
+    # ⭐ 第 2 片：EventHandler 的 metadata 按**v2 读侧真读的键**给（`EventHandlerEntry` 逐字取那三个）
+    print(f"  [本片新增] EventHandler 声明 ⇒ {second}")
+    assert second["name"] == "pre_process_probe", second
+    assert second["type"] == "EVENT_HANDLER", second
+    assert second["metadata"]["event_type"] == "on_message_pre_process", second
+    assert second["metadata"]["weight"] == 5, second
+    assert second["metadata"]["intercept_message"] is True, second
+    assert second["metadata"]["handler_name"] == "pre_process_probe", second
+    assert second["metadata"]["legacy"] is True, second
+
+    # ⭐ EventHandler 的**其余形态**（四种，都翻得动；口径见 `_v1_event_type_value` / `_from_instance_then_info`）：
+    #   ① 值只在**描述对象**上（类属性没写）· ② `event_type` 是**枚举**（上游 compat 在场时那种）
+    #   ③ `event_type` 是**大写串**（两面都不归一 ⇒ 行为与上游一致，见回执覆盖边界）
+    #   ④ **实例优先**：实例上写着 `False` / `0`，描述对象上写着 `True` / `9` ⇒ 必须听实例的
+    class _EnumLike(Enum):
+        """本地面里 `EventType` 仍是 stub ⇒ 造一个"类 EventType"来走枚举这一支。"""
+
+        ON_MESSAGE_PRE_PROCESS = "on_message_pre_process"
+
+    class _BareHandler:
+        async def execute(self, message: Any) -> tuple:
+            return True, True, None, None, None
+
+    class _InstanceWins:
+        event_type = "on_start"
+        intercept_message = False
+        weight = 0
+
+        async def execute(self, message: Any) -> tuple:
+            return True, True, None, None, None
+
+    @register_plugin
+    class VariantPlugin(BasePlugin):
+        plugin_name = "bridge-variant"
+
+        def get_plugin_components(self):
+            return [
+                (
+                    EventHandlerInfo(
+                        name="from_info",
+                        component_type=ComponentType.EVENT_HANDLER,
+                        event_type=_EnumLike.ON_MESSAGE_PRE_PROCESS,
+                        weight=0,
+                        intercept_message=False,
+                    ),
+                    _BareHandler,
+                ),
+                (
+                    EventHandlerInfo(
+                        name="upper_case",
+                        component_type=ComponentType.EVENT_HANDLER,
+                        event_type="ON_MESSAGE_PRE_PROCESS",
+                    ),
+                    _BareHandler,
+                ),
+                (
+                    EventHandlerInfo(name="no_event_type", component_type=ComponentType.EVENT_HANDLER),
+                    _BareHandler,
+                ),
+                (
+                    EventHandlerInfo(
+                        name="instance_wins",
+                        component_type=ComponentType.EVENT_HANDLER,
+                        event_type="never_used",
+                        weight=9,
+                        intercept_message=True,
+                    ),
+                    _InstanceWins,
+                ),
+            ]
+
+    variants = {item["name"]: item["metadata"] for item in legacy_face.LocalLegacyPluginAdapter(VariantPlugin()).get_components()}
+    print(
+        f"  [形态自证] 描述对象上的枚举 ⇒ {variants['from_info']['event_type']!r} · "
+        f"大写串 ⇒ {variants['upper_case']['event_type']!r} · "
+        f"没写 ⇒ {variants['no_event_type']['event_type']!r} · "
+        f"实例优先 ⇒ {variants['instance_wins']['event_type']!r}/"
+        f"{variants['instance_wins']['intercept_message']!r}/{variants['instance_wins']['weight']!r}"
+    )
+    assert variants["from_info"]["event_type"] == "on_message_pre_process", variants
+    assert variants["from_info"]["intercept_message"] is False, variants  # False 是"写得明明白白"，不是"没写"
+    assert variants["upper_case"]["event_type"] == "ON_MESSAGE_PRE_PROCESS", variants  # 两面都不归一
+    assert variants["no_event_type"]["event_type"] == "on_message", variants  # v1 基类默认
+    assert variants["instance_wins"]["event_type"] == "on_start", variants
+    assert variants["instance_wins"]["intercept_message"] is False, variants
+    assert variants["instance_wins"]["weight"] == 0, variants
 
 
 def item3_unmappable_is_named() -> None:

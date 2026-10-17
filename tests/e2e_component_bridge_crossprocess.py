@@ -32,7 +32,8 @@
 
 ## 覆盖到哪一步（如实）
 ✅ 覆盖：宿主 TCP 监听 → runner 子进程握手 → 本地面装上（`bridge-local`）→ 老插件类被认出来
-        → `LocalLegacyPluginAdapter` 构造 → `get_components()` 翻 v1→v2 → `plugin.register_components`
+        → `LocalLegacyPluginAdapter` 构造 → `get_components()` 翻 v1→v2（第 1 片 `command` +
+        第 2 片 `event_handler`，两条一起走）→ `plugin.register_components`
         RPC → **宿主 handler 收到载荷** → **真注册进 ComponentRegistry**（断言点：注册产物）
 ❌ 不覆盖：宿主把组件喂给 LLM/工具路由的那一跳；也不覆盖 `host/supervisor.py` 的生产装配
         （本件自己起 `RPCServer`）。宿主 handler 是**替身**：只替"外壳"，注册用真物。
@@ -89,6 +90,13 @@ READY_TIMEOUT_S = 120.0
 LEGACY_PLUGIN_ID = "e2e.legacy-demo"
 PLUGIN_REPO_DIR = REPO_ROOT / "plugins" / "maibot-team.v1-compat"
 
+#: ⭐ EventHandler 夹具的取值**刻意全取非默认**（见 `_LEGACY_SOURCE`）：三个字段只要有一个没翻过去，
+#: (甲) 里"按 event_type 真查得到 + 三个字段逐个对"就会红。全取默认值时，"字段丢了"与"翻对了"
+#: **看着一模一样** —— `EventHandlerEntry` 的默认正是 `event_type=""` / `weight=0` / `intercept_message=False`。
+_EVENT_HANDLER_NAME = "pre_process_probe"
+_EVENT_TYPE = "on_message_pre_process"
+_EVENT_WEIGHT = 5
+
 _MANIFEST_V1_FIXTURE: dict[str, Any] = {
     # ⚠️ 本基点宿主只收 manifest_version = 2（manifest_validator 的 SUPPORTED_MANIFEST_VERSIONS）
     "manifest_version": 2,
@@ -105,10 +113,10 @@ _MANIFEST_V1_FIXTURE: dict[str, Any] = {
 }
 
 # 旧版面插件：真正的 `get_plugin_components()` —— 里面**构造描述对象**那一步正是过去的卡点
-_LEGACY_SOURCE = '''"""E2E 夹具：旧版面（V1）插件，带一个 Command 组件。"""
+_LEGACY_SOURCE = '''"""E2E 夹具：旧版面（V1）插件，带一个 Command 组件 + 一个 EventHandler 组件。"""
 
-from src.plugin_system import BasePlugin, CommandInfo, ComponentType, register_plugin
-from src.plugin_system.base.component_types import ToolParamType
+from src.plugin_system import BaseEventHandler, BasePlugin, CommandInfo, ComponentType, register_plugin
+from src.plugin_system.base.component_types import EventHandlerInfo, ToolParamType
 
 
 class PingCommand:
@@ -122,6 +130,23 @@ class PingCommand:
         return True, "pong", 0
 
 
+class PreProcessProbe(BaseEventHandler):
+    """旧版 EventHandler 组件（**类属性**声明 —— v1 的 `get_handler_info()` 就是抄这些）。
+
+    ⚠️ 三个取值刻意都取**非默认**（event_type / weight / intercept_message）：只要有一个字段没翻过去，
+    (甲) 里那条"按 event_type 真查得到 + 三个字段逐个对"就会红。
+    """
+
+    event_type = "on_message_pre_process"
+    handler_name = "pre_process_probe"
+    handler_description = "示例事件处理器"
+    weight = 5
+    intercept_message = True
+
+    async def execute(self, message):
+        return True, True, None, None, None
+
+
 @register_plugin
 class E2ELegacyDemoPlugin(BasePlugin):
     plugin_name = "e2e-legacy-demo"
@@ -130,7 +155,7 @@ class E2ELegacyDemoPlugin(BasePlugin):
         pass
 
     def get_plugin_components(self):
-        """⭐ 过不去的正是这一步：构造 CommandInfo。"""
+        """⭐ 过不去的正是这一步：构造描述对象（CommandInfo / EventHandlerInfo）。"""
         return [
             (
                 CommandInfo(
@@ -140,6 +165,16 @@ class E2ELegacyDemoPlugin(BasePlugin):
                     command_pattern=r"^/ping",
                 ),
                 PingCommand,
+            ),
+            (
+                # ⭐ event_type / weight / intercept_message **不在这里给** ⇒ 只能从实例的类属性上取
+                #   （老插件的规范写法；"实例优先、没写才回落到描述对象"这条约定因此被真走过）
+                EventHandlerInfo(
+                    name="pre_process_probe",
+                    component_type=ComponentType.EVENT_HANDLER,
+                    description="示例事件处理器",
+                ),
+                PreProcessProbe,
             ),
         ]
 
@@ -351,10 +386,10 @@ def _runner_lines(result: dict[str, Any], needle: str, limit: int = 14) -> list[
 
 
 async def case_positive(tmp_path: Path) -> int:
-    """**主判据 (甲)**：老插件的 Command 组件**真的注册进了宿主**。"""
+    """**主判据 (甲)**：老插件的 Command + EventHandler 组件**真的注册进了宿主**。"""
 
     print("\n" + "=" * 78)
-    print("(甲) 老插件 Command 组件 ⇒ 跨进程注册真的发生")
+    print("(甲) 老插件 Command + EventHandler 组件 ⇒ 跨进程注册真的发生")
     print("=" * 78)
     plugin_root = tmp_path / "plugins"
     _write_plugin(plugin_root, "e2e_legacy_demo", LEGACY_PLUGIN_ID, _LEGACY_SOURCE)
@@ -385,8 +420,11 @@ async def case_positive(tmp_path: Path) -> int:
     print(json.dumps(registration["payload"], ensure_ascii=False, indent=2)[:4000])
     print("[e2e] ---- 载荷原文结束 ----\n")
     print(f"[e2e] 宿主 ComponentRegistry.register_plugin_components 返回 = {registration['registered_count']}")
-    assert registration["registered_count"] and registration["registered_count"] >= 1, (
-        f"宿主注册组件数为 0 ⇒ '组件注册'这件事**没发生**：{registration['registered_count']}"
+    declared = len(registration["payload"]["components"])
+    assert declared >= 2, f"载荷里只有 {declared} 条组件声明（本片起至少 Command + EventHandler 两条）"
+    assert registration["registered_count"] == declared, (
+        f"声明 {declared} 条、真注册 {registration['registered_count']} 条"
+        " ⇒ 有声明在翻 v2 那一步被静默吞掉了（这正是'加载成功、组件却没注册'的假绿）"
     )
 
     registry: ComponentRegistry = result["registry"]
@@ -401,6 +439,28 @@ async def case_positive(tmp_path: Path) -> int:
     print("[e2e] ---- 注册产物结束 ----\n")
     assert entry.component_type.value == "COMMAND", entry.component_type
     assert entry.compiled_pattern is not None and entry.compiled_pattern.pattern == r"^/ping", entry.compiled_pattern
+
+    # ⭐ 第 2 片新增的那一类：判据 (甲) 要求"载荷里出现该类型 + 返回数 + get_component 拿得到"，
+    #    这里再加一条 v2 的**消费路径**（EventDispatcher 就是这么查的：按 event_type 取、按 weight 排）。
+    handler_entry = registry.get_component(f"{LEGACY_PLUGIN_ID}.{_EVENT_HANDLER_NAME}")
+    assert handler_entry is not None, f"宿主注册表里查不到 {LEGACY_PLUGIN_ID}.{_EVENT_HANDLER_NAME}"
+    print(f"[e2e] registry.get_component('{LEGACY_PLUGIN_ID}.{_EVENT_HANDLER_NAME}') = {handler_entry!r}")
+    print(f"[e2e]   component_type = {handler_entry.component_type!r}")
+    print(
+        f"[e2e]   event_type = {handler_entry.event_type!r} · weight = {handler_entry.weight!r}"
+        f" · intercept_message = {handler_entry.intercept_message!r}"
+    )
+    print(f"[e2e]   metadata = {handler_entry.metadata!r}")
+    assert handler_entry.component_type.value == "EVENT_HANDLER", handler_entry.component_type
+    assert handler_entry.event_type == _EVENT_TYPE, handler_entry.event_type
+    assert handler_entry.weight == _EVENT_WEIGHT, handler_entry.weight
+    assert handler_entry.intercept_message is True, handler_entry.intercept_message
+    matched = registry.get_event_handlers(_EVENT_TYPE)
+    print(f"[e2e] registry.get_event_handlers('{_EVENT_TYPE}') = {[item.full_name for item in matched]}")
+    assert [item.full_name for item in matched] == [f"{LEGACY_PLUGIN_ID}.{_EVENT_HANDLER_NAME}"], matched
+    assert registry.get_event_handlers("on_message") == [], (
+        "换一个 event_type 也命中 ⇒ 上一条是恒真的（查询根本没按 event_type 过滤）"
+    )
 
     stdout_evidence = _runner_lines(result, "注册完成") + _runner_lines(result, "bridge-local")
     print("[e2e] ---- runner 侧 stdout 日志（原文）----")
