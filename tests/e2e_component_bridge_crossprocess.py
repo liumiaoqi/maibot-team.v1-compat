@@ -32,8 +32,8 @@
 
 ## 覆盖到哪一步（如实）
 ✅ 覆盖：宿主 TCP 监听 → runner 子进程握手 → 本地面装上（`bridge-local`）→ 老插件类被认出来
-        → `LocalLegacyPluginAdapter` 构造 → `get_components()` 翻 v1→v2（第 1 片 `command` +
-        第 2 片 `event_handler`，两条一起走）→ `plugin.register_components`
+        → `LocalLegacyPluginAdapter` 构造 → `get_components()` 翻 v1→v2（`command` / `event_handler` /
+        `action` 三类一起走）→ `plugin.register_components`
         RPC → **宿主 handler 收到载荷** → **真注册进 ComponentRegistry**（断言点：注册产物）
 ❌ 不覆盖：宿主把组件喂给 LLM/工具路由的那一跳；也不覆盖 `host/supervisor.py` 的生产装配
         （本件自己起 `RPCServer`）。宿主 handler 是**替身**：只替"外壳"，注册用真物。
@@ -97,6 +97,12 @@ _EVENT_HANDLER_NAME = "pre_process_probe"
 _EVENT_TYPE = "on_message_pre_process"
 _EVENT_WEIGHT = 5
 
+#: ⭐ Action 夹具：`action_parameters` 刻意**只写在实例类属性**上（不写进 `ActionInfo`）⇒
+#: 走一遍"实例优先、没写才回落到描述对象"；`description` 走描述对象 ⇒ 两个来源都真被读过。
+_ACTION_NAME = "poke"
+_ACTION_DESCRIPTION = "示例动作：戳一下"
+_ACTION_PARAMETERS = {"target": "要戳的对象"}
+
 _MANIFEST_V1_FIXTURE: dict[str, Any] = {
     # ⚠️ 本基点宿主只收 manifest_version = 2（manifest_validator 的 SUPPORTED_MANIFEST_VERSIONS）
     "manifest_version": 2,
@@ -113,10 +119,10 @@ _MANIFEST_V1_FIXTURE: dict[str, Any] = {
 }
 
 # 旧版面插件：真正的 `get_plugin_components()` —— 里面**构造描述对象**那一步正是过去的卡点
-_LEGACY_SOURCE = '''"""E2E 夹具：旧版面（V1）插件，带一个 Command 组件 + 一个 EventHandler 组件。"""
+_LEGACY_SOURCE = '''"""E2E 夹具：旧版面（V1）插件，带 Command + EventHandler + Action 三个组件。"""
 
 from src.plugin_system import BaseEventHandler, BasePlugin, CommandInfo, ComponentType, register_plugin
-from src.plugin_system.base.component_types import EventHandlerInfo, ToolParamType
+from src.plugin_system.base.component_types import ActionInfo, EventHandlerInfo, ToolParamType
 
 
 class PingCommand:
@@ -147,6 +153,21 @@ class PreProcessProbe(BaseEventHandler):
         return True, True, None, None, None
 
 
+class PokeAction:
+    """旧版 Action 组件（**类属性**声明 —— `action_parameters` 刻意只写在这里）。
+
+    ⚠️ 取非空 `action_parameters`：v2 的 tool 读侧（`_convert_action_metadata_to_tool_metadata`）
+    会把它变成 `parameters_raw`；空 dict 时"翻对了"与"没翻"**看着一样**（都是没有 properties）。
+    """
+
+    action_name = "poke"
+    action_description = "示例动作：戳一下"
+    action_parameters = {"target": "要戳的对象"}
+
+    async def execute(self):
+        return True, "poke", 0
+
+
 @register_plugin
 class E2ELegacyDemoPlugin(BasePlugin):
     plugin_name = "e2e-legacy-demo"
@@ -155,7 +176,7 @@ class E2ELegacyDemoPlugin(BasePlugin):
         pass
 
     def get_plugin_components(self):
-        """⭐ 过不去的正是这一步：构造描述对象（CommandInfo / EventHandlerInfo）。"""
+        """⭐ 过不去的正是这一步：构造描述对象（CommandInfo / EventHandlerInfo / ActionInfo）。"""
         return [
             (
                 CommandInfo(
@@ -176,28 +197,39 @@ class E2ELegacyDemoPlugin(BasePlugin):
                 ),
                 PreProcessProbe,
             ),
+            (
+                # ⭐ Action 的 metadata 按 **tool 读侧**给（宿主把 ACTION 转成 ToolEntry）：
+                #   `action_parameters` 只在实例上 ⇒ "实例优先"这条回落方向真被走过；
+                #   `description` 走描述对象 ⇒ host 侧 `_convert_action_metadata_to_tool_metadata`
+                #   从 metadata 读它（顶层 description 进不了 `ComponentDeclaration`）。
+                ActionInfo(
+                    name="poke",
+                    component_type=ComponentType.ACTION,
+                    description="示例动作：戳一下",
+                ),
+                PokeAction,
+            ),
         ]
 
 
 __all__ = ["E2ELegacyDemoPlugin"]
 '''
 
-_LEGACY_SOURCE_ACTION_ONLY = '''"""E2E 夹具（反向对照）：只带 Action 组件的老插件 ⇒ 本地面应**具名出声**。"""
+_LEGACY_SOURCE_TOOL_ONLY = '''"""E2E 夹具（反向对照）：只带 Tool 组件的老插件 ⇒ 本地面应**具名出声**（`tool` 未立项）。"""
 
-from src.plugin_system import ActionInfo, BasePlugin, ComponentType, register_plugin
+from src.plugin_system import BasePlugin, ComponentType, ToolInfo, register_plugin
 
 
-class PokeAction:
-    action_name = "poke"
-    action_description = "示例动作"
+class LookupTool:
+    tool_description = "示例工具"
 
     async def execute(self):
-        return True, "poke", 0
+        return True, "ok", 0
 
 
 @register_plugin
-class E2ELegacyActionOnlyPlugin(BasePlugin):
-    plugin_name = "e2e-legacy-action-only"
+class E2ELegacyToolOnlyPlugin(BasePlugin):
+    plugin_name = "e2e-legacy-tool-only"
 
     def __init__(self) -> None:
         pass
@@ -205,13 +237,13 @@ class E2ELegacyActionOnlyPlugin(BasePlugin):
     def get_plugin_components(self):
         return [
             (
-                ActionInfo(name="poke", component_type=ComponentType.ACTION, description="示例动作"),
-                PokeAction,
+                ToolInfo(name="lookup", component_type=ComponentType.TOOL, tool_description="示例工具"),
+                LookupTool,
             ),
         ]
 
 
-__all__ = ["E2ELegacyActionOnlyPlugin"]
+__all__ = ["E2ELegacyToolOnlyPlugin"]
 '''
 
 
@@ -386,10 +418,10 @@ def _runner_lines(result: dict[str, Any], needle: str, limit: int = 14) -> list[
 
 
 async def case_positive(tmp_path: Path) -> int:
-    """**主判据 (甲)**：老插件的 Command + EventHandler 组件**真的注册进了宿主**。"""
+    """**主判据 (甲)**：老插件的 Command + EventHandler + Action 组件**真的注册进了宿主**。"""
 
     print("\n" + "=" * 78)
-    print("(甲) 老插件 Command + EventHandler 组件 ⇒ 跨进程注册真的发生")
+    print("(甲) 老插件 Command + EventHandler + Action 组件 ⇒ 跨进程注册真的发生")
     print("=" * 78)
     plugin_root = tmp_path / "plugins"
     _write_plugin(plugin_root, "e2e_legacy_demo", LEGACY_PLUGIN_ID, _LEGACY_SOURCE)
@@ -421,7 +453,7 @@ async def case_positive(tmp_path: Path) -> int:
     print("[e2e] ---- 载荷原文结束 ----\n")
     print(f"[e2e] 宿主 ComponentRegistry.register_plugin_components 返回 = {registration['registered_count']}")
     declared = len(registration["payload"]["components"])
-    assert declared >= 2, f"载荷里只有 {declared} 条组件声明（本片起至少 Command + EventHandler 两条）"
+    assert declared >= 3, f"载荷里只有 {declared} 条组件声明（本片起至少 Command + EventHandler + Action 三条）"
     assert registration["registered_count"] == declared, (
         f"声明 {declared} 条、真注册 {registration['registered_count']} 条"
         " ⇒ 有声明在翻 v2 那一步被静默吞掉了（这正是'加载成功、组件却没注册'的假绿）"
@@ -462,6 +494,35 @@ async def case_positive(tmp_path: Path) -> int:
         "换一个 event_type 也命中 ⇒ 上一条是恒真的（查询根本没按 event_type 过滤）"
     )
 
+    # ⭐ 本片新增：Action 的声明是 `ACTION`；宿主把它**转成 ToolEntry**（`legacy_component_type=ACTION`、
+    #    `invoke_method=plugin.invoke_action`、`action_parameters` → `parameters_raw`）。
+    #    载荷那一段**单独打印**（上面整包载荷按 4000 字符截断，别让证据被截掉）。
+    action_decl = next(
+        (item for item in registration["payload"]["components"] if item["name"] == _ACTION_NAME),
+        None,
+    )
+    assert action_decl is not None, f"载荷里没有 Action 声明：{[c['name'] for c in registration['payload']['components']]}"
+    print("[e2e] ---- Action 被翻成的 v2 dict（载荷原文）----")
+    print(json.dumps(action_decl, ensure_ascii=False, indent=2))
+    print("[e2e] ---- 结束 ----\n")
+    assert action_decl["component_type"] == "ACTION", action_decl
+    assert action_decl["metadata"]["action_parameters"] == _ACTION_PARAMETERS, action_decl
+    assert action_decl["metadata"]["description"] == _ACTION_DESCRIPTION, action_decl
+    assert action_decl["metadata"]["handler_name"] == _ACTION_NAME, action_decl
+    assert action_decl["metadata"]["legacy"] is True, action_decl
+
+    action_entry = registry.get_component(f"{LEGACY_PLUGIN_ID}.{_ACTION_NAME}")
+    assert action_entry is not None, f"宿主注册表里查不到 {LEGACY_PLUGIN_ID}.{_ACTION_NAME}"
+    print(f"[e2e] registry.get_component('{LEGACY_PLUGIN_ID}.{_ACTION_NAME}') = {action_entry!r}")
+    print(f"[e2e]   component_type = {action_entry.component_type!r}")
+    print(f"[e2e]   invoke_method = {action_entry.invoke_method!r}")
+    print(f"[e2e]   parameters_raw = {action_entry.parameters_raw!r}")
+    print(f"[e2e]   metadata = {action_entry.metadata!r}")
+    assert action_entry.component_type.value == "TOOL", action_entry.component_type
+    assert action_entry.metadata["legacy_component_type"] == "ACTION", action_entry.metadata
+    assert action_entry.invoke_method == "plugin.invoke_action", action_entry.invoke_method
+    assert action_entry.parameters_raw["properties"]["target"]["description"] == "要戳的对象", action_entry.parameters_raw
+
     stdout_evidence = _runner_lines(result, "注册完成") + _runner_lines(result, "bridge-local")
     print("[e2e] ---- runner 侧 stdout 日志（原文）----")
     for line in stdout_evidence:
@@ -478,8 +539,8 @@ async def case_positive(tmp_path: Path) -> int:
     return 0
 
 
-async def case_action_only_is_named(tmp_path: Path) -> int:
-    """(丙) 回归：**只带 Action 的老插件** ⇒ 翻不动 ⇒ 具名出声。
+async def case_tool_only_is_named(tmp_path: Path) -> int:
+    """(丙) 回归：**只带 Tool 的老插件** ⇒ 翻不动 ⇒ 具名出声（`tool` 仍未立项）。
 
     ⚠️ 本件**如实断言实测链路**（`component-bridge` 实测改判，与最初设想不同）：
     本地面确实抛了**具名**异常（stderr 里有原文），但**宿主侧拿不到** ——
@@ -492,10 +553,10 @@ async def case_action_only_is_named(tmp_path: Path) -> int:
     """
 
     print("\n" + "=" * 78)
-    print("(丙) 翻不动的类别 ⇒ 具名出声（实测：具名落在跨进程边界**之前**）")
+    print("(丙) 翻不动的类别（tool）⇒ 具名出声（实测：具名落在跨进程边界**之前**）")
     print("=" * 78)
     plugin_root = tmp_path / "plugins"
-    _write_plugin(plugin_root, "e2e_legacy_action_only", "e2e.legacy-action-only", _LEGACY_SOURCE_ACTION_ONLY)
+    _write_plugin(plugin_root, "e2e_legacy_tool_only", "e2e.legacy-tool-only", _LEGACY_SOURCE_TOOL_ONLY)
 
     result = await _run_runner([plugin_root], tmp_path=tmp_path, block_compat=True)
     payload = result["payload"]
@@ -513,14 +574,14 @@ async def case_action_only_is_named(tmp_path: Path) -> int:
         print(f"  {line}")
     print("[e2e] ---- 结束 ----\n")
     assert stderr_lines, _diagnose(result, "翻不动却没在 stderr 里给出具名原因（那就是静默）")
-    assert any("'action' 尚未立项" in line for line in stderr_lines), stderr_lines
+    assert any("'tool' 尚未立项" in line for line in stderr_lines), stderr_lines
     assert any("不静默跳过" in line for line in stderr_lines), stderr_lines
 
     # 与"静默"划清界限：③ 没有偷偷注册 ④ 没有偷偷算加载成功
     assert not result["registration"].get("registered_count"), (
         f"翻不动却注册了组件（静默降级）：{result['registration']!r}"
     )
-    assert "e2e.legacy-action-only" not in loaded, loaded
+    assert "e2e.legacy-tool-only" not in loaded, loaded
     print(
         "[e2e] ⚠️ 未坐实（如实）：这条具名原因**没进宿主** `failed_plugin_reasons`"
         "（那一跳无 try ⇒ runner 崩、两栏皆空）——宿主侧兜底属**另立一件**。"
@@ -563,7 +624,7 @@ async def main() -> int:
     failures: list[str] = []
     for name, case in (
         ("(甲) 组件注册真的发生", case_positive),
-        ("(丙) 翻不动 ⇒ 具名", case_action_only_is_named),
+        ("(丙) 翻不动 ⇒ 具名", case_tool_only_is_named),
         ("(乙) 上游在场 ⇒ 行为不变", case_upstream_present),
     ):
         case_dir = root / name.split()[0].strip("()")

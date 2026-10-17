@@ -314,23 +314,24 @@ def item3_unmappable_is_named() -> None:
     _line("件③(丙) 翻不动 ⇒ 具名出声（LocalFaceGapError；宿主侧兜底另立一件）")
     legacy_face.install_local_face(force=True)
 
-    from src.plugin_system import ActionInfo, BasePlugin, ComponentType  # noqa: PLC0415
+    from src.plugin_system import BasePlugin, ComponentType, ToolInfo  # noqa: PLC0415
 
     class _NotWired:
         pass
 
-    class _ActionOnly(BasePlugin):
-        plugin_name = "action-only"
+    class _ToolOnly(BasePlugin):
+        plugin_name = "tool-only"
 
         def get_plugin_components(self):
             return [
                 (
-                    ActionInfo(name="poke", component_type=ComponentType.ACTION, description="示例动作"),
+                    # ⭐ 本片补上 `action` 之后，**未立项**的反向对照换成 `tool`（tool 仍未立项）
+                    ToolInfo(name="lookup", component_type=ComponentType.TOOL, tool_description="示例工具"),
                     _NotWired,
                 )
             ]
 
-    adapter = legacy_face.LocalLegacyPluginAdapter(_ActionOnly())
+    adapter = legacy_face.LocalLegacyPluginAdapter(_ToolOnly())
     try:
         adapter.get_components()
     except legacy_face.LocalFaceGapError as exc:

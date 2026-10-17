@@ -23,9 +23,9 @@
 "**构造描述对象那一步**"就抛 `LocalFaceGapError` ⇒ 适配器 `get_components()` 自然给不出东西。
 这一跳把它们做成**真数据**（字段名/默认值/SDK 语义对齐运行期 `maibot_sdk.compat.base.component_types`），
 并让 `LocalLegacyPluginAdapter.get_components()` **真翻**出 v2 dict。
-⚠️ 只翻得动**已立项**的那几类（见 `_V1_TO_V2_COMPONENT_TYPE`：现为 `command` / `event_handler`）；
-其余类别**具名出声**，⛔ 不静默给空。`metadata` 一律按**该类在 v2 侧真读的键**给（不是把 v1 的字段
-原样倒过去）—— 逐类的读侧出处写在 `LocalLegacyPluginAdapter._convert_component` 的 docstring 里。
+⚠️ 只翻得动**已立项**的那几类（见 `_V1_TO_V2_COMPONENT_TYPE`：现为 `command` / `event_handler` /
+`action`）；其余类别**具名出声**，⛔ 不静默给空。`metadata` 一律按**该类在 v2 侧真读的键**给（不是把
+v1 的字段原样倒过去）—— 逐类的读侧出处写在 `LocalLegacyPluginAdapter._convert_component` 的 docstring 里。
 """
 
 from __future__ import annotations
@@ -164,6 +164,9 @@ class ComponentInfo:
 class ActionInfo(ComponentInfo):
     """旧版 Action 描述（字段/默认值/次序照上游 `component_types.py:96-110` **全带 10 个**）。
 
+    ⭐ 本片立项：`action` → `ACTION`（宿主把 ACTION 转成 ToolEntry ⇒ `metadata` 按 **tool 读侧**给，
+    见 `_convert_component` 的 ACTION 条）。
+
     ⚠️ 激活面**这一半现在真落了**：三个 `*_activation_type` 的默认值指向上面的
     `ActionActivationType`（故本类要求它先实现，见那个类的 docstring）。
     ⚠️ 仍**不在这里**的是 `ChatMode`（它不在 `ActionInfo` 的字段里，`ActionInfo` 不需要它）。
@@ -234,11 +237,16 @@ class EventHandlerInfo(ComponentInfo):
 #: 只列**已立项**的：别的一律由 `_convert_component` 具名出声（⛔ 不静默给空）。
 #: 逐类放行（放行之前先读**v2 侧真读哪些键**，不是把 v1 的字段原样倒过去）：
 #: * `command`       —— `component-bridge` 第 1 片；读侧 `host/component_registry.py:155-161`；
-#: * `event_handler` —— 第 2 片（本片）；读侧 `:257-259`（`EventHandlerEntry.__init__` 逐字取
-#:   `event_type` / `weight` / `intercept_message`）+ `:1092`（按 `event_type` 比）+ `:1094`（按 `weight` 排）。
+#: * `event_handler` —— 第 2 片；读侧 `:257-259`（`EventHandlerEntry.__init__` 逐字取
+#:   `event_type` / `weight` / `intercept_message`）+ `:1092`（按 `event_type` 比）+ `:1094`（按 `weight` 排）；
+#: * `action`        —— 本片；宿主把 ACTION **转成 ToolEntry**（`:674-683`）⇒ 按 **tool 读侧**给：
+#:   `:534`（`_convert_action_metadata_to_tool_metadata` 读 `action_parameters` 建 `parameters_raw`
+#:   JSON-schema）+ `:552`（读 `description`；⚠️ `ComponentDeclaration` **没有** description 字段
+#:   ⇒ 顶层 description 到不了宿主，必须进 metadata）+ `runner/runner_main.py:1389`（`handler_name`）。
 _V1_TO_V2_COMPONENT_TYPE: Dict[str, str] = {
     "command": "COMMAND",
     "event_handler": "EVENT_HANDLER",
+    "action": "ACTION",
 }
 
 #: ⭐ 已立项映射的**内容层**自证（判据 (丁) 的第二层；第一层是"条数 > 0"，见 `assert_nonempty`）。
@@ -249,6 +257,7 @@ _V1_TO_V2_COMPONENT_TYPE: Dict[str, str] = {
 _REQUIRED_MAPPINGS: Dict[str, str] = {
     "command": "COMMAND",
     "event_handler": "EVENT_HANDLER",
+    "action": "ACTION",
 }
 
 
@@ -397,8 +406,8 @@ class LocalLegacyPluginAdapter:
 
         ⭐ 与 `adapter-hop` 那一版的关键差别：那一版返回**空集**（"宿主看得见插件、看不见组件"），
         理由是"转换逻辑在上游 `_convert_component`、本件没搬"；本跳把**已立项的那几类**
-        （`CommandInfo` → `COMMAND`；`EventHandlerInfo` → `EVENT_HANDLER`，见 `_V1_TO_V2_COMPONENT_TYPE`）
-        真搬过来 ⇒ 老插件的**命令类 / 事件处理器组件**从此真能被注册。
+        （`CommandInfo` → `COMMAND`；`EventHandlerInfo` → `EVENT_HANDLER`；`ActionInfo` → `ACTION`，
+        见 `_V1_TO_V2_COMPONENT_TYPE`）真搬过来 ⇒ 老插件的**命令 / 事件处理器 / 动作组件**从此真能被注册。
         ⚠️ 注册得上 ≠ 调得动：调用路由（`metadata["handler_name"]` → 实例上那个可调用）仍是**下一跳**，
         本件只做**声明面**（与上一片同边界）。
 
@@ -486,7 +495,15 @@ class LocalLegacyPluginAdapter:
         * `EVENT_HANDLER` ⇒ `event_type` / `weight` / `intercept_message` —— 读侧 `:257-259`
           （`EventHandlerEntry.__init__` 逐字取这三个键）+ `:1092`（`get_event_handlers` 按
           `event_type` 比）+ `:1094`（按 `weight` 降序排）。
-        * 两类共有 `handler_name` —— 读侧 `runner/runner_main.py:1389`：拿它建
+        * `ACTION` ⇒ `action_parameters` / `description` —— 宿主把 ACTION **转成 ToolEntry**
+          （`:674-683`，`invoke_method` 由宿主置为 `plugin.invoke_action`）⇒ 按 **tool 读侧**给：
+          `:534`（`_convert_action_metadata_to_tool_metadata` 用 `action_parameters` 建
+          `parameters_raw` JSON-schema）+ `:552`（`description`；⚠️ `ComponentDeclaration` **没有**
+          description 字段 ⇒ 顶层那个到不了宿主，必须放进 metadata）。**不带**激活面字段
+          （`activation_type` / `activation_probability` / …）：那是 action 查询/展示侧的读侧
+          （`component_query._build_action_info:158-189`、`webui/routers/plugin/runtime_routes.py:50-59`），
+          不在 tool 的 invoke 路径上（覆盖边界见回执）。
+        * 三类共有 `handler_name` —— 读侧 `runner/runner_main.py:1389`：拿它建
           `meta.component_handlers` 映射；缺了会**静默回落**成组件名（故这里显式给组件名，
           与上游 compat 不给该键**等效**）。`legacy=True` 是本地面身份标记。
 
@@ -528,6 +545,22 @@ class LocalLegacyPluginAdapter:
                     "weight": int(_from_instance_then_info(instance, comp_info, "weight", 0)),
                 }
                 description = description or str(getattr(instance, "handler_description", "") or "")
+            elif raw_type == "action":
+                # ⭐ 宿主把 ACTION **转成 ToolEntry**（`component_registry.py:674-683`，`invoke_method`
+                #   由宿主置为 `plugin.invoke_action`）⇒ metadata 按 **tool 读侧**给（先读后写）：
+                #   * `action_parameters` —— `:534` 用它建 `parameters_raw`（LLM 工具参数的 JSON-schema）；
+                #   * `description` —— `:552`（`ToolEntry.description`）从 metadata 读；⚠️ 顶层
+                #     description 在 `ComponentDeclaration` 里**没有字段**，到不了宿主。
+                #   与 v1 的 10 个字段**不是**原样倒过去：激活面字段不在 tool 的 invoke 路径上（见 docstring）。
+                description = description or str(getattr(instance, "action_description", "") or "")
+                metadata = {
+                    # 取值口径同 `_from_instance_then_info`：实例（类属性）优先，没写才回落到描述对象。
+                    # `dict(...)` 把形状按 v2 的读法收住；不是 dict / 成对序列 ⇒ 走下面那个具名 except。
+                    "action_parameters": dict(
+                        _from_instance_then_info(instance, comp_info, "action_parameters", {}) or {}
+                    ),
+                    "description": description,
+                }
             else:  # 表里已立项但这里没有分支 ⇒ 具名（加类时漏改这里，不该静默走成别的类）
                 raise LocalFaceGapError(
                     f"组件 {name or '?'} 的类型 {raw_type!r} 已在 `_V1_TO_V2_COMPONENT_TYPE` 里立项，"
