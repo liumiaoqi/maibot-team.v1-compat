@@ -15,18 +15,34 @@
 * **按形状/清单找，不按变量名找**：别名表来自清单，不靠猜上游内部常量名；
 * **缺口出声**：未实现的名字**可 import**（`from src.plugin_system import X` 通），但**用到就抛**
   `LocalFaceGapError` ⇒ 不存在"看着在、其实是空的"。
+
+组件桥（`component-bridge` 那一跳）
+----------------------------------
+`Base*` 四个基类在 `adapter-hop` 那一跳已实现，但**描述组件用的数据载体**（`ComponentType` +
+5 个 `*Info` + `ToolParamType`）当时还在 stub 名单里 ⇒ 老插件在 `get_plugin_components()` 里
+"**构造描述对象那一步**"就抛 `LocalFaceGapError` ⇒ 适配器 `get_components()` 自然给不出东西。
+这一跳把它们做成**真数据**（字段名/默认值/SDK 语义对齐运行期 `maibot_sdk.compat.base.component_types`），
+并让 `LocalLegacyPluginAdapter.get_components()` **真翻**出 v2 dict。
+⚠️ 只翻得动**已立项**的那一类（见 `_V1_TO_V2_COMPONENT_TYPE`）；其余类别**具名出声**，⛔ 不静默给空。
 """
 
 from __future__ import annotations
 
+import dataclasses
 import importlib
 import importlib.abc
 import importlib.machinery
 import json
 import sys
 import types
+from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, List
+
+#: ⛔ 这里**故意不做**"自愈式 `sys.modules` 注册"：`exec_module` 期间模块对象**还没进**
+#: `sys.modules`，本文件手上只有自己的 globals、拿不到那个对象 ⇒ 只能造一个**替身**塞进去，
+#: 而 dataclasses 恰恰要的是"`cls.__module__` 那个模块里能找到本类"，替身里没有本类
+#: ⇒ 换汤不换药（实测过）。根在加载器：见宿主 `plugin_loader` 两处 `exec_module` 前的注册。
 
 _SURFACE_PATH = Path(__file__).with_name("legacy_face_surface.json")
 
@@ -43,6 +59,142 @@ SURFACE: dict[str, Any] = _load_surface()
 ALIASES: Dict[str, str] = dict(SURFACE["aliases"])
 FACE_NAMES: List[str] = list(SURFACE["names"])
 SIGNATURE_MODULES: List[str] = list(SURFACE["signature_modules"])
+
+
+# ── 组件描述载体（老插件 `get_plugin_components()` 里**真会构造**的那些）──────────
+#
+# ⭐ 为什么要**真数据**而不是 stub：老插件拿组件跟宿主对话的第一句就是"构造描述对象"
+#    （`CommandInfo(name="ping", component_type=ComponentType.COMMAND, command_pattern="^/ping")`）
+#    ——那一刻若是 stub，抛的是 `LocalFaceGapError`，而症状看起来跟"宿主不支持这类组件"
+#    一模一样。
+# ⇒ 字段名/默认值/枚举取值与运行期 `maibot_sdk.compat.base.component_types` **对齐**：
+#    老插件是按那份签名写的，字段名错一个就是 `TypeError`（"能加载 ≠ 能用"的第二层）。
+# ⚠️ `ComponentType.<X>.value` 是**小写**（`"command"`）：v2 侧的 `_normalize_component_type`
+#    先 `.upper()` 再查表，故大小写这层由宿主吃掉；本地面按 SDK 原样保留小写。
+#
+# ⚠️⚠️ **`@dataclass` 需要一个能进 `sys.modules` 的模块名**（CPython 3.14 实测）：
+#    宿主按"路径 exec"加载本文件（`spec_from_file_location` + `exec_module`，**不注册
+#    `sys.modules`**）时，`@dataclass` 会崩在
+#        `AttributeError: 'NoneType' object has no attribute '__dict__'`
+#        （dataclasses.py `_is_type()` → `sys.modules.get(cls.__module__)` 返回 None）。
+#    ⇒ 配套修在宿主 `plugin_loader`（`_local_face_attr` / `_install_local_legacy_face`：
+#      exec 前把模块注册进 `sys.modules`）。**光改本文件绕不过去**（换 `attrs`/手写 `__init__`
+#      都能绕，但那是拿"不用标准库"换"藏住加载器的缺陷"——加载器迟早还会 exec 别的 dataclass 模块）。
+
+
+class ComponentType(Enum):
+    """旧版组件类型（取值与 SDK 兼容层一致：小写）。"""
+
+    ACTION = "action"
+    COMMAND = "command"
+    TOOL = "tool"
+    SCHEDULER = "scheduler"
+    EVENT_HANDLER = "event_handler"
+
+    def __str__(self) -> str:
+        return self.value
+
+
+class ToolParamType(Enum):
+    """旧版 Tool 参数类型（v2 侧改由 JSON-schema 表示 ⇒ 见"语义上真不同"第 ② 条）。"""
+
+    STRING = "string"
+    INTEGER = "integer"
+    FLOAT = "float"
+    BOOLEAN = "boolean"
+    ARRAY = "array"
+    OBJECT = "object"
+
+    def __str__(self) -> str:
+        return self.value
+
+
+@dataclasses.dataclass
+class ComponentInfo:
+    """旧版组件描述基类（**身份载体**：v2 那边组件身份是 dict 的 `type` 字段）。
+
+    ⚠️ `component_type` 是**必填参数**（与运行期 `maibot_sdk.compat` 那份**逐字对齐**；
+    也与旧版原样一致——老源码 `src/plugin_system/base/component_types.py` 在本仓历史
+    `bb497c1a3` 可查，其工厂 `BaseCommand.get_command_info()` / `BaseAction.get_action_info()`
+    都是**显式传** `component_type=ComponentType.COMMAND` 的）。
+    ⛔ 本地面**故意不给默认值**：加默认值会让"本地面能构造、上游 compat 构造不了"——两套面
+    行为不一致比缺失更坏（同一个老插件在两套面下会有两种命运）。
+    """
+
+    name: str
+    component_type: ComponentType
+    description: str = ""
+    enabled: bool = True
+    plugin_name: str = ""
+    is_built_in: bool = False
+    metadata: Dict[str, Any] = dataclasses.field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        """旧版原样：`metadata=None` 兜成 `{}`（老插件确实会显式传 None）。"""
+
+        if self.metadata is None:
+            self.metadata = {}
+
+
+@dataclasses.dataclass
+class ActionInfo(ComponentInfo):
+    """旧版 Action 描述。
+
+    ⚠️ 激活面**不在这里**：`ActionActivationType` / `ChatMode` 仍是 stub
+    （那是"语义上真不同"第 ① 条：v1 类属性+枚举 vs v2 参数+描述生成 ⇒ 非一一映射）。
+    """
+
+    action_parameters: Dict[str, str] = dataclasses.field(default_factory=dict)
+    action_require: List[str] = dataclasses.field(default_factory=list)
+    associated_types: List[str] = dataclasses.field(default_factory=list)
+    parallel_action: bool = False
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        self.component_type = ComponentType.ACTION
+
+
+@dataclasses.dataclass
+class CommandInfo(ComponentInfo):
+    """旧版 Command 描述（⭐ 本轮**唯一**翻得动的那一类）。"""
+
+    command_pattern: str = ""
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        self.component_type = ComponentType.COMMAND
+
+
+@dataclasses.dataclass
+class ToolInfo(ComponentInfo):
+    """旧版 Tool 描述（参数是**元组表**；v2 要 JSON-schema ⇒ 见"语义上真不同"第 ② 条）。"""
+
+    tool_parameters: List[Any] = dataclasses.field(default_factory=list)
+    tool_description: str = ""
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        self.component_type = ComponentType.TOOL
+
+
+@dataclasses.dataclass
+class EventHandlerInfo(ComponentInfo):
+    """旧版 EventHandler 描述。"""
+
+    event_type: Any = "on_message"
+    intercept_message: bool = False
+    weight: int = 0
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        self.component_type = ComponentType.EVENT_HANDLER
+
+
+#: ⭐ v1 组件类型（**小写取值**）→ v2 声明 `type`（**大写**，对齐宿主 `ComponentTypes`）。
+#: 只列**已立项**的：别的一律由 `_convert_component` 具名出声（⛔ 不静默给空）。
+_V1_TO_V2_COMPONENT_TYPE: Dict[str, str] = {
+    "command": "COMMAND",
+}
 
 
 # ── 已实现的名字（老插件在本仓真会用到的那些）─────────────────────────────────
@@ -92,7 +244,8 @@ class LocalLegacyPluginAdapter:
     宿主侧**真会调用**的只有这些（逐一核对过调用点）：
     * `_set_context(ctx)`      —— `runner_main.py:701`（`hasattr` 探测）/ `:774`
     * `get_components()`       —— `runner_main.py:1378-1380`（R-2 形状：`list[dict]`，由 Runner 读
-      `name`/`type`/`metadata` 建 `ComponentDeclaration`）
+      `name`/`type`/`metadata` 建 `ComponentDeclaration`）—— `component-bridge` 那一跳起**真翻**
+      已立项的组件类别（见本方法 docstring），⛔ 翻不动就具名出声
     * `get_config_reload_subscriptions()` —— `:1408-1409`
     * `on_load()` / `on_unload()` —— `:1567-1571` / `:1589-1593`（**转发给旧实例**）
     * `on_config_update(scope, config_data, version)` —— `:2372-2380`（三参，**存在性被检查**）
@@ -104,6 +257,8 @@ class LocalLegacyPluginAdapter:
     def __init__(self, legacy_instance: Any) -> None:
         self._legacy = legacy_instance
         self._ctx: Any = None
+        #: v1 组件名 → (描述对象, 实例)——`invoke_component` 将来要按名字找实例。
+        self._components: Dict[str, Any] = {}
 
     # ── 生命周期：转发给旧实例（旧实例没实现就什么都不做）──────────────
 
@@ -139,19 +294,123 @@ class LocalLegacyPluginAdapter:
         self._ctx = ctx
 
     def get_components(self) -> list[dict[str, Any]]:
-        """返回新版组件声明的**空集**——旧版组件的桥接另有一条路。
+        """把旧实例的 `get_plugin_components()` 翻成 **Runner 要的 v2 dict**（真翻，不是空集）。
 
-        为什么是空集而不是转换 `get_plugin_components()`：旧版返回的是
-        `list[tuple[ComponentInfo, type]]`，而 Runner 要的是**新 schema 的 dict**
-        （`type`/`name`/`description`/`metadata`，见 `runner_main.py:1392-1407`）；
-        转换逻辑在上游 `LegacyPluginAdapter._convert_component` 里，**本件没搬**
-        （超范围，且搬了就是复刻上游实现）。
-        ⇒ 老插件在"上游缺席 + 本地面"这条路上**能被加载、能跑生命周期**，但其旧版组件
-        暂不被注册（宿主看得见插件、看不见它的组件）——**这是如实的最小面**，不是静默：
-        本模块的 `coverage()`/`assert_nonempty()` 报的是 import 面覆盖，不含组件桥接。
+        形状（与 `runner_main.py:1377-1404` 的读法逐条对齐）：
+        `{"name": str, "type": str, "description": str, "metadata": dict}`
+        —— `type` 是**大写**（宿主 `ComponentTypes` 的取值域），`metadata` 进
+        `ComponentDeclaration.metadata`。
+
+        ⭐ 与 `adapter-hop` 那一版的关键差别：那一版返回**空集**（"宿主看得见插件、看不见组件"），
+        理由是"转换逻辑在上游 `_convert_component`、本件没搬"；本跳把**已立项的一类**
+        （`CommandInfo` → `COMMAND`，见 `_V1_TO_V2_COMPONENT_TYPE`）真搬过来 ⇒ 老插件的
+        **命令类组件**从此真能被注册。
+
+        ⛔ **翻不动的类别不许静默跳过**（具名出声）：
+        上游那一版对未知类型只 `logger.warning` + `return None`（组件凭空消失）；本地面照
+        "缺口出声"的规矩**直接抛**，⛔ 不返回空、不 `continue`（那才是"加载成功、组件却没注册"）。
+
+        ## ⚠️ 实测：这条"具名"落在**跨进程边界之前**（第三个缺口，需宿主侧修）
+        本方法是在**宿主自己的激活链**里被调的（`runner_main._register_plugin:1380`），而那一跳
+        **没有 try**（上游 `_activate_plugin:1636` 没有，`run():461` 也没有）⇒ 抛出去会一路逃到
+        `runner_main.main()`、**把 runner 子进程打挂**：
+        * 症状：宿主侧 `plugin.register_components` 那次 RPC **根本没发生**；
+          `runner.ready` 载荷里 `failed_plugins` / `failed_plugin_reasons` **两栏都空**
+          ——正是要避免的"插件凭空消失"，只是这次它**写在 stderr 里**（具名，没被吞）。
+        * 实测过"换成普通 `RuntimeError`"**没有用**（同一条链上没有 `except`），所以本件不为此
+          多铺异常类型；**真要落地"宿主 failed_plugin_reasons 里看得见"，必须宿主侧在那一跳
+          加兜（把 `get_components()` 的异常收成具名失败）** —— 与上游 `LegacyPluginAdapter`
+          同一处（它现在是静默 `return None`，症状更坏）。
+        * 本地面这一侧**保持抛**：宁可 runner 响、也不静默退化成空集。
+
+        Raises:
+            LocalFaceGapError: 旧实例没给出 `get_plugin_components()`、旧插件自己抛错、某个组件的
+                类型尚未立项、或组件缺 `name` / 实例化失败。**原因一律具名**（点名组件名 + 类型）。
         """
 
-        return []
+        return self._collect_declarations()
+
+    def _collect_declarations(self) -> list[dict[str, Any]]:
+        """`get_components()` 的正体。"""
+
+        provider = getattr(self._legacy, "get_plugin_components", None)
+        if provider is None:
+            raise LocalFaceGapError(
+                f"旧实例 {type(self._legacy).__name__} 没有 get_plugin_components()"
+                "——本地面无法知道它有哪些组件（缺口出声，不静默给空）"
+            )
+
+        try:
+            entries = list(provider())
+        except Exception as exc:  # noqa: BLE001 - 旧插件自己抛的（例如 stub 描述载体）⇒ 具名转给宿主
+            raise LocalFaceGapError(
+                f"旧实例 {type(self._legacy).__name__}.get_plugin_components() 抛错"
+                f"（{type(exc).__name__}: {exc}）"
+            ) from exc
+
+        declarations: list[dict[str, Any]] = []
+        for entry in entries:
+            comp_info, comp_cls = self._unpack_component_entry(entry)
+            if not bool(getattr(comp_info, "enabled", True)):
+                continue
+            name = str(getattr(comp_info, "name", "") or "").strip()
+            if not name:
+                raise LocalFaceGapError(f"组件缺 name（描述对象 {type(comp_info).__name__}）⇒ 无法注册（不静默跳过）")
+            try:
+                instance = comp_cls()
+            except Exception as exc:  # noqa: BLE001 - 实例化失败也要**具名**（不许静默丢组件）
+                raise LocalFaceGapError(f"组件 {name} 实例化失败（{type(comp_cls).__name__}: {exc}）") from exc
+            self._components[name] = (comp_info, instance)
+            declarations.append(self._convert_component(comp_info, instance))
+        return declarations
+
+    @staticmethod
+    def _unpack_component_entry(entry: Any) -> tuple[Any, Any]:
+        """把 `get_plugin_components()` 的一项拆成 `(描述对象, 组件类)`。
+
+        旧版契约是 `list[tuple[ComponentInfo, type]]`；形状不对就具名出声
+        （⛔ 不 `continue` 跳过——"跳过"就是组件凭空消失）。
+        """
+
+        if isinstance(entry, (tuple, list)) and len(entry) == 2:
+            return entry[0], entry[1]
+        raise LocalFaceGapError(
+            f"get_plugin_components() 的返回项形状不对：期望 (ComponentInfo, type)，实得 {type(entry).__name__}"
+        )
+
+    @staticmethod
+    def _convert_component(comp_info: Any, instance: Any) -> dict[str, Any]:
+        """单个 v1 描述对象 → v2 声明 dict（**只认已立项的类型**）。
+
+        Raises:
+            LocalFaceGapError: 类型未立项，或已立项但缺必填字段。
+        """
+
+        raw_type = str(getattr(getattr(comp_info, "component_type", ""), "value", "") or "").strip().lower()
+        component_type = _V1_TO_V2_COMPONENT_TYPE.get(raw_type)
+        if component_type is None:
+            raise LocalFaceGapError(
+                f"组件 {getattr(comp_info, 'name', '?')} 的类型 {raw_type or '?'!r} 尚未立项"
+                f"（本地面已立项：{sorted(_V1_TO_V2_COMPONENT_TYPE)}）"
+                " ⇒ 不静默跳过（否则会得到'加载成功、组件却没注册'的假绿）"
+            )
+
+        name = str(getattr(comp_info, "name", "") or "").strip()
+        description = str(getattr(comp_info, "description", "") or "").strip()
+        metadata: Dict[str, Any] = {
+            # 实例上没写就回落到描述对象（老插件两种写法都有）
+            "command_pattern": str(
+                getattr(instance, "command_pattern", "") or getattr(comp_info, "command_pattern", "") or ""
+            ),
+            "handler_name": name,
+            "legacy": True,
+        }
+        return {
+            "name": name,
+            "type": component_type,
+            "description": description or str(getattr(instance, "command_description", "") or ""),
+            "metadata": metadata,
+        }
 
     def get_config_reload_subscriptions(self) -> list[str]:
         """旧实例未声明订阅 ⇒ 空（不抬级、不猜测）。"""
@@ -187,6 +446,14 @@ _IMPLEMENTED: Dict[str, Any] = {
     "BaseTool": _ComponentBase,
     "BaseCommand": _ComponentBase,
     "BaseEventHandler": _ComponentBase,
+    # ── 组件描述载体（`component-bridge` 那一跳：由 stub 升为真数据）──────────────
+    "ComponentType": ComponentType,
+    "ComponentInfo": ComponentInfo,
+    "ActionInfo": ActionInfo,
+    "CommandInfo": CommandInfo,
+    "ToolInfo": ToolInfo,
+    "EventHandlerInfo": EventHandlerInfo,
+    "ToolParamType": ToolParamType,
     "register_plugin": register_plugin,
     "get_logger": _log_event,
     "PROJECT_ROOT": str(Path(__file__).resolve().parent),
@@ -196,6 +463,23 @@ _IMPLEMENTED: Dict[str, Any] = {
     "PLUGINS_DIR": "plugins",
     "INTERNAL_PLUGINS_DIR": "plugins",
 }
+
+#: ⭐ `assert_nonempty` 的**组件栏**：这一跳**已实现**的描述载体（判据 (丁)：0 条 ⇒ 直接红）。
+#: 为什么单列一栏：`names` 那一栏是"面上有多少个名字"，**不区分真实现与 stub** ⇒ 老插件
+#: "构造描述对象那一步"全体抛错时，`names`/`aliases` 两栏照样是满的（看着全绿、其实全瞎）。
+#: ⚠️ 只列**本轮真落地的 7 个**：`ActionActivationType` / `ChatMode` 仍是 stub，**不进这一栏**
+#: —— 本栏的判据是"实现没实现"，把它们算进来就是**恒假**的红（第一版就这么错过一次：
+#: `assert_nonempty()` 每次都抛 ⇒ 兜底面整块装不上 ⇒ 现场症状是"老插件又变成
+#: `No module named 'src.plugin_system'`"，与"兜底面没写"长得一模一样）。
+_COMPONENT_CARRIERS: tuple[str, ...] = (
+    "ComponentType",
+    "ComponentInfo",
+    "ActionInfo",
+    "CommandInfo",
+    "ToolInfo",
+    "EventHandlerInfo",
+    "ToolParamType",
+)
 
 
 def _make_stub(name: str) -> Any:
@@ -257,6 +541,9 @@ def _build_alias_module(target: str) -> types.ModuleType:
     if not tail:
         return _build_top_level_module()
     module = types.ModuleType(f"src.plugin_system.{tail.replace('.', '_')}")
+    # ⭐ 必须挂 `__path__`：否则 `import src.plugin_system.base.component_types` 会在
+    #    "`base` 不是包"这一步就 `ModuleNotFoundError`（**还没轮到**走到名字查表）。
+    module.__path__ = []  # type: ignore[attr-defined]
     if tail.startswith("apis"):
         parts = tail.split(".")
         api_name = parts[1] if len(parts) > 1 else ""
@@ -281,7 +568,11 @@ class _LocalFaceFinder(importlib.abc.MetaPathFinder):
     def find_spec(self, fullname: str, path: Any = None, target: Any = None) -> Any:
         if fullname != "src.plugin_system" and not fullname.startswith("src.plugin_system."):
             return None
-        is_package = fullname == "src.plugin_system"
+        # ⚠️ "是不是包"不能只看顶层：`src.plugin_system.base` / `…apis` 是**中间层**
+        #    而 `…base.component_types` 这种子模块导入要求它先被认成包（只认顶层会
+        #    得到 `No module named 'src.plugin_system.base.component_types';
+        #    'src.plugin_system.base' is not a package`）。别名表里的每一个路径都算包。
+        is_package = fullname == "src.plugin_system" or fullname in ALIASES
         spec = importlib.machinery.ModuleSpec(fullname, _LocalFaceLoader(fullname), is_package=is_package)
         return spec
 
@@ -306,6 +597,12 @@ def assert_nonempty() -> Dict[str, int]:
     ⭐ `adapter` 一栏是 `adapter-hop` 这一跳的自证：`LocalLegacyPluginAdapter` 抽到 0 个
     ⇒ 直接红 —— 否则"上游缺席时由本地面接住"这条路会在**没人察觉**的情况下退化成
     "面在、adapter 不在"，症状与现在（`failed_plugin_reasons` 非空）长得一模一样。
+
+    ⭐ `components` 一栏是 `component-bridge` 这一跳的自证（判据 (丁)）：**组件描述载体**
+    （`ComponentType` + 5 个 `*Info` + `ToolParamType`）在 `_IMPLEMENTED` 里抽到 0 个 ⇒ 直接红。
+    为什么这条不能靠 `names` 那一栏兜：老插件在 `get_plugin_components()` 里"构造描述对象"
+    那一步若全体抛错，`names`/`aliases` 两栏**照样是满的**（stub 也占名字位）⇒ 只数名字
+    等于"看着全绿、其实构造不出任何组件"。
     """
 
     counts = {
@@ -313,10 +610,18 @@ def assert_nonempty() -> Dict[str, int]:
         "names": len(FACE_NAMES),
         "signature_modules": len(SIGNATURE_MODULES),
         "adapter": 1 if LocalLegacyPluginAdapter else 0,
+        "components": len([name for name in _COMPONENT_CARRIERS if name in _IMPLEMENTED]),
+        "mappable_component_types": len(_V1_TO_V2_COMPONENT_TYPE),
     }
     empty = [key for key, value in counts.items() if value <= 0]
     if empty:
         raise LocalFaceGapError(f"搬运清单为空（{', '.join(empty)}）—— '空'不等于'一致'，本地面可能已瞎")
+    missing_carriers = [name for name in _COMPONENT_CARRIERS if name not in _IMPLEMENTED]
+    if missing_carriers:
+        raise LocalFaceGapError(
+            f"组件描述载体缺 {len(missing_carriers)} 个：{missing_carriers}"
+            " —— 老插件构造描述对象那一步会当场抛，本地面等于'看着在、其实构造不了组件'"
+        )
     return counts
 
 

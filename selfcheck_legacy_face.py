@@ -5,7 +5,9 @@
 覆盖：
 * 件①(甲) 合成"上游 compat 缺席" ⇒ 本地面装上后老插件的 import 面**仍通**（贴原文）；
 * 件①(乙) 反向自检：**搬漏一条** ⇒ 该路径 import **必须出声**（`LocalFaceGapError`）；
-* 件①非空自证：清单为空 ⇒ 直接红；并打印**抽到了多少条**（35/60/24）；
+* 件①非空自证：清单为空 ⇒ 直接红；并打印**抽到了多少条**（35/60/24）+ ⭐ **组件栏**（判据 (丁)）；
+* 件③(甲) **组件桥**：描述载体真能构造 + `LocalLegacyPluginAdapter.get_components()` 真翻出 v2 dict；
+* 件③(丙) 反向自检：**翻不动的类别 / 没有 get_plugin_components / 载体被抹掉** 三条都必须出声；
 * 件②(甲) 合成 runner 侧 `warning` ⇒ 宿主侧**按 level 过滤仍能看到**（贴原文）；
 * 件②(乙) 正常 `info` **不被抬级**（否则就是"整体上抬"换可见）。
 """
@@ -70,6 +72,10 @@ def item1_nonempty_and_reverse() -> None:
         f"  抽到: 别名 {counts['aliases']} 条 · 名字 {counts['names']} 个 · "
         f"签名模块 {counts['signature_modules']} 个 · adapter {counts['adapter']} 个"
     )
+    print(
+        f"  ⭐ 组件栏（判据 (丁)，0 条即红）: 描述载体 {counts['components']} 个 · "
+        f"已立项可翻的类别 {counts['mappable_component_types']} 类"
+    )
     print(f"  覆盖: {legacy_face.coverage()}")
 
     # ⭐ `adapter-hop` 那一跳的自证（判据 (丁) 的第二栏）：本地面若抽不到 adapter，这条路会在
@@ -113,6 +119,126 @@ def item1_nonempty_and_reverse() -> None:
         legacy_face.FACE_NAMES.extend(keep_names)
 
 
+def item3_component_bridge() -> None:
+    """件③（`component-bridge` 那一跳）：描述载体**真能构造** + `get_components()` **真翻**出 v2 dict。"""
+
+    _line("件③ 组件桥：载体可构造 + 真翻 v2 dict")
+    sys.modules["maibot_sdk.compat"] = None
+    legacy_face.install_local_face(force=True)
+    for key in [k for k in sys.modules if k.startswith("src.plugin_system")]:
+        del sys.modules[key]
+
+    from src.plugin_system import BasePlugin, CommandInfo, ComponentType, register_plugin  # noqa: PLC0415
+    from src.plugin_system.base.component_types import ToolParamType  # noqa: PLC0415
+
+    print(
+        "  构造 CommandInfo ⇒ "
+        f"{CommandInfo(name='ping', component_type=ComponentType.COMMAND, command_pattern='^/ping')!r}"
+    )
+    print(f"  ComponentType.COMMAND = {ComponentType.COMMAND!r}（v1 取值小写）· ToolParamType.STRING = {ToolParamType.STRING!r}")
+
+    class _PingCommand:
+        command_pattern = "^/ping"
+        command_description = "示例命令"
+
+        async def execute(self) -> str:
+            return "pong"
+
+    @register_plugin
+    class BridgePlugin(BasePlugin):
+        plugin_name = "bridge-demo"
+
+        def get_plugin_components(self):
+            return [
+                (
+                    CommandInfo(
+                        name="ping",
+                        component_type=ComponentType.COMMAND,
+                        description="示例命令",
+                        command_pattern="^/ping",
+                    ),
+                    _PingCommand,
+                ),
+            ]
+
+    adapter = legacy_face.LocalLegacyPluginAdapter(BridgePlugin())
+    declarations = adapter.get_components()
+    print(f"  adapter.get_components() ⇒ {declarations}")
+    assert isinstance(declarations, list) and len(declarations) == 1, declarations
+    first = declarations[0]
+    assert first["name"] == "ping", first
+    assert first["type"] == "COMMAND", first
+    assert first["metadata"]["command_pattern"] == "^/ping", first
+    assert first["metadata"]["legacy"] is True, first
+    assert isinstance(first["metadata"], dict), first
+
+
+def item3_unmappable_is_named() -> None:
+    """件③（丙）：**翻不动 ⇒ 具名出声**（⛔ 不许静默给空）——两条都验。"""
+
+    _line("件③(丙) 翻不动 ⇒ 具名出声（LocalFaceGapError；宿主侧兜底另立一件）")
+    legacy_face.install_local_face(force=True)
+
+    from src.plugin_system import ActionInfo, BasePlugin, ComponentType  # noqa: PLC0415
+
+    class _NotWired:
+        pass
+
+    class _ActionOnly(BasePlugin):
+        plugin_name = "action-only"
+
+        def get_plugin_components(self):
+            return [
+                (
+                    ActionInfo(name="poke", component_type=ComponentType.ACTION, description="示例动作"),
+                    _NotWired,
+                )
+            ]
+
+    adapter = legacy_face.LocalLegacyPluginAdapter(_ActionOnly())
+    try:
+        adapter.get_components()
+    except legacy_face.LocalFaceGapError as exc:
+        print(f"  [未立项的类别] 出声 ✓：{exc}")
+    else:
+        raise AssertionError("未立项的组件类别却**没有**出声 —— 那就是'加载成功、组件却没注册'的假绿")
+    # ⚠️ 这里**不能**用 `BasePlugin` 子类：本地面基类自带 `get_plugin_components()`（返回 `[]`）
+    #    ⇒ 永远走不到"没有 provider"这一支。用一个**裸对象**才测得到。
+    class _NoProvider:
+        pass
+
+    adapter = legacy_face.LocalLegacyPluginAdapter(_NoProvider())
+    try:
+        adapter.get_components()
+    except legacy_face.LocalFaceGapError as exc:
+        print(f"  [没有 get_plugin_components] 出声 ✓：{exc}")
+    else:
+        raise AssertionError("旧实例连 get_plugin_components 都没有，却静默给了空")
+
+    # 载体被抹掉 ⇒ 组件栏那一栏必须红（否则"0 条"与"全在"不可分辨）
+    keep = {name: legacy_face._IMPLEMENTED.pop(name) for name in legacy_face._COMPONENT_CARRIERS}
+    try:
+        try:
+            legacy_face.assert_nonempty()
+        except legacy_face.LocalFaceGapError as exc:
+            print(f"  [组件栏的反向自检] 载体清空 ⇒ 直接红 ✓：{exc}")
+        else:
+            raise AssertionError("组件描述载体全没了却没红 ⇒ 组件栏是恒真的")
+    finally:
+        legacy_face._IMPLEMENTED.update(keep)
+
+    # [对照] 没有组件的插件仍返回空列表（**空清单合法**；空是"插件真没组件"，不是"翻不动被吞掉"）
+    class _NoComponents(BasePlugin):
+        plugin_name = "no-components"
+
+        def get_plugin_components(self):
+            return []
+
+    print(f"  [对照] 无组件的插件仍返回空列表：{legacy_face.LocalLegacyPluginAdapter(_NoComponents()).get_components()}")
+    print(f"  [对照] 'command' 在已立项名单里：{'command' in legacy_face._V1_TO_V2_COMPONENT_TYPE}")
+    print(f"  [对照] CommandInfo 在 _IMPLEMENTED 里（即已移出 stub 名单）：{'CommandInfo' in legacy_face._IMPLEMENTED}")
+
+
 def item2_log_level_passthrough() -> None:
     """件②：runner 的 warning 经宿主转发**仍可在 warning 视图里看到**；info 不被抬级。"""
 
@@ -150,5 +276,7 @@ def item2_log_level_passthrough() -> None:
 if __name__ == "__main__":
     item1_positive()
     item1_nonempty_and_reverse()
+    item3_component_bridge()
+    item3_unmappable_is_named()
     item2_log_level_passthrough()
     print("\n全部自检通过。")

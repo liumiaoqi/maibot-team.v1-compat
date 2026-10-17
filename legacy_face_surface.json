@@ -5,6 +5,26 @@
     "aliases": 35,
     "names": 60,
     "signature_modules": 24,
+    "implemented_names": 20,
+    "stubbed_names": 25,
+    "stubbed_names_note": "口径 = 名字在清单里、既不在 _IMPLEMENTED、也不是 *_api 模块（_api 走 _build_api_module 那条路，不算 stub）",
+    "component_carriers": {
+      "implemented": 7,
+      "total": 7,
+      "names": [
+        "ComponentType",
+        "ComponentInfo",
+        "ActionInfo",
+        "CommandInfo",
+        "ToolInfo",
+        "EventHandlerInfo",
+        "ToolParamType"
+      ]
+    },
+    "mappable_component_types": {
+      "implemented": ["command"],
+      "note": "v1 小写取值 → v2 大写 type；只列已立项的，其余由 _convert_component 具名出声（⛔ 不静默给空）"
+    },
     "submodules": {
       "apis": [
         "chat_api.py",
